@@ -99,9 +99,12 @@ func (m *Manager) Reload(ctx context.Context) error {
 		}
 
 		accountRows, err := m.db.Query(ctx, `
-			SELECT account_id
-			FROM integration_instance_accounts
-			WHERE integration_instance_id = $1 AND enabled = TRUE
+			SELECT ia.account_id
+			FROM integration_instance_accounts ia
+			JOIN accounts a ON a.id = ia.account_id
+			WHERE ia.integration_instance_id = $1
+			  AND ia.enabled = TRUE
+			  AND COALESCE(a.kommo_enabled, false) = TRUE
 		`, id)
 		if err != nil {
 			return err
@@ -156,7 +159,9 @@ func (m *Manager) ForAccount(ctx context.Context, accountID uuid.UUID) *SyncServ
 		SELECT i.id
 		FROM integration_instances i
 		JOIN integration_instance_accounts ia ON ia.integration_instance_id = i.id
+		JOIN accounts a ON a.id = ia.account_id
 		WHERE i.provider = $1 AND i.is_active = TRUE AND i.status = $2 AND ia.account_id = $3 AND ia.enabled = TRUE
+		  AND COALESCE(a.kommo_enabled, false) = TRUE
 		ORDER BY ia.created_at ASC
 		LIMIT 1
 	`, domain.IntegrationProviderKommo, domain.IntegrationStatusActive, accountID).Scan(&instanceID)

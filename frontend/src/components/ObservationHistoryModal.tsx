@@ -22,6 +22,10 @@ interface ObservationHistoryModalProps {
   onClose: () => void
   /** lead_id for API calls */
   leadId: string
+  /** Event participant ID — when present, history is resolved through the participant/contact/lead graph */
+  participantId?: string | null
+  /** Event ID used when creating participant observations */
+  eventId?: string | null
   /** Contact ID — if provided, API calls use /api/contacts/:id/interactions */
   contactId?: string | null
   /** Display name for header */
@@ -38,6 +42,8 @@ export default function ObservationHistoryModal({
   isOpen,
   onClose,
   leadId,
+  participantId,
+  eventId,
   contactId,
   name,
   observations: initialObservations,
@@ -87,7 +93,9 @@ export default function ObservationHistoryModal({
   const fetchObservations = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
-      const url = contactId
+      const url = participantId
+        ? `/api/interactions?participant_id=${participantId}&limit=200`
+        : contactId
         ? `/api/contacts/${contactId}/interactions?limit=200`
         : `/api/leads/${leadId}/interactions?limit=200`
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
@@ -99,7 +107,7 @@ export default function ObservationHistoryModal({
     } catch (err) {
       console.error('Failed to fetch observations:', err)
     }
-  }, [leadId, contactId])
+  }, [leadId, participantId, contactId])
 
   // Infinite scroll with IntersectionObserver
   useEffect(() => {
@@ -124,7 +132,9 @@ export default function ObservationHistoryModal({
     setSaving(true)
     const token = localStorage.getItem('token')
     try {
-      const body = contactId
+      const body = participantId
+        ? { event_id: eventId || undefined, participant_id: participantId, contact_id: contactId || undefined, lead_id: leadId, type: newType, notes: newText.trim() }
+        : contactId
         ? { contact_id: contactId, type: newType, notes: newText.trim() }
         : { lead_id: leadId, type: newType, notes: newText.trim() }
       const res = await fetch('/api/interactions', {

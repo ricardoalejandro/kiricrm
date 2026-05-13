@@ -127,6 +127,7 @@ function hexBgLight(hex: string) { const { r, g, b } = hexToRgb(hex); return `rg
 function participantToLead(p: Participant): any {
   return {
     id: p.lead_id || p.id,
+    original_lead_id: p.lead_id || null,
     name: p.name || '',
     last_name: p.last_name || null,
     short_name: p.short_name || null,
@@ -430,6 +431,7 @@ export default function EventDetailPage() {
   const [showDeviceSelector, setShowDeviceSelector] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
   const [whatsappPhone, setWhatsappPhone] = useState('')
+  const whatsappPhoneRef = useRef('')
 
   // Add participant
   const [showAddModal, setShowAddModal] = useState(false)
@@ -1248,21 +1250,32 @@ export default function EventDetailPage() {
 
   // ─── WhatsApp ──────────────────────────────────────────────────────────────
   const handleSendWhatsApp = async (phone: string) => {
-    setWhatsappPhone(phone)
+    const cleanPhone = (phone || '').replace(/[^0-9]/g, '')
+    if (!cleanPhone) {
+      alert('Este participante no tiene un número válido')
+      return
+    }
+    setWhatsappPhone(cleanPhone)
+    whatsappPhoneRef.current = cleanPhone
     await fetchDevices()
     const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${getToken()}` } })
     const data = await res.json()
     const connected = (data.devices || []).filter((d: Device) => d.status === 'connected')
     if (connected.length === 1) {
-      handleDeviceSelectedForChat(connected[0], phone)
+      handleDeviceSelectedForChat(connected[0], cleanPhone)
     } else {
+      setDevices(connected)
       setShowDeviceSelector(true)
     }
   }
 
   const handleDeviceSelectedForChat = async (device: Device, phone?: string) => {
     setShowDeviceSelector(false)
-    const cleanPhone = (phone || whatsappPhone).replace(/[^0-9]/g, '')
+    const cleanPhone = (phone || whatsappPhoneRef.current || whatsappPhone).replace(/[^0-9]/g, '')
+    if (!cleanPhone) {
+      alert('No hay número seleccionado para abrir el chat')
+      return
+    }
     try {
       const res = await fetch('/api/chats/new', {
         method: 'POST',
@@ -3293,6 +3306,9 @@ export default function EventDetailPage() {
           isOpen={true}
           onClose={() => setListHistoryParticipant(null)}
           leadId={listHistoryParticipant.lead_id || listHistoryParticipant.id}
+          participantId={listHistoryParticipant.id}
+          eventId={eventId}
+          contactId={listHistoryParticipant.contact_id}
           name={listHistoryParticipant.name || 'Sin nombre'}
           observations={listObservations.get(listHistoryParticipant.id) || []}
           onObservationChange={() => {

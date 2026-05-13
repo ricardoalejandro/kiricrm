@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	fiberRecover "github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/formula"
 	googleclient "github.com/naperu/clarin/internal/google"
@@ -10261,10 +10263,68 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 
 	if participantID := c.Query("participant_id"); participantID != "" {
 		if pid, err := uuid.Parse(participantID); err == nil {
-			interactions, err := s.services.Interaction.GetByParticipantID(c.Context(), pid)
+			accountID := c.Locals("account_id").(uuid.UUID)
+			var contactID, leadID *uuid.UUID
+			err := s.repos.DB().QueryRow(c.Context(), `
+				SELECT COALESCE(ep.contact_id, l.contact_id), ep.lead_id
+				FROM event_participants ep
+				JOIN events e ON e.id = ep.event_id
+				LEFT JOIN leads l ON l.id = ep.lead_id
+				WHERE ep.id = $1 AND e.account_id = $2
+			`, pid, accountID).Scan(&contactID, &leadID)
+			if err != nil {
+				if err == pgx.ErrNoRows {
+					return c.JSON(fiber.Map{"success": true, "interactions": []*domain.Interaction{}})
+				}
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+			}
+
+			rows, err := s.repos.DB().Query(c.Context(), `
+				SELECT DISTINCT ON (i.id)
+				       i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id,
+				       i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date,
+				       i.created_by, i.created_at, u.display_name AS created_by_name
+				FROM interactions i
+				LEFT JOIN users u ON u.id = i.created_by
+				WHERE i.account_id = $1
+				  AND (
+				    i.participant_id = $2
+				    OR ($3::uuid IS NOT NULL AND i.contact_id = $3)
+				    OR ($4::uuid IS NOT NULL AND i.lead_id = $4)
+				    OR ($3::uuid IS NOT NULL AND i.lead_id IN (
+				      SELECT l2.id FROM leads l2 WHERE l2.account_id = $1 AND l2.contact_id = $3
+				    ))
+				  )
+				ORDER BY i.id, i.created_at DESC
+			`, accountID, pid, contactID, leadID)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 			}
+			defer rows.Close()
+
+			var all []*domain.Interaction
+			for rows.Next() {
+				it := &domain.Interaction{}
+				if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName); err != nil {
+					return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+				}
+				all = append(all, it)
+			}
+			if err := rows.Err(); err != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+			}
+			sort.Slice(all, func(i, j int) bool {
+				return all[i].CreatedAt.After(all[j].CreatedAt)
+			})
+			if offset > len(all) {
+				all = []*domain.Interaction{}
+			} else {
+				all = all[offset:]
+			}
+			if limit > 0 && len(all) > limit {
+				all = all[:limit]
+			}
+			interactions := all
 			if interactions == nil {
 				interactions = make([]*domain.Interaction, 0)
 			}

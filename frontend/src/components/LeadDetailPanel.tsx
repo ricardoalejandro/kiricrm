@@ -322,7 +322,7 @@ export default function LeadDetailPanel({
     } else if (contactId) {
       fetchContactTasks(contactId)
     }
-  }, [leadProp.id])
+  }, [leadProp.id, participantId, contactId])
 
   // Auto-scroll to tasks section when scrollToTasks prop is set
   useEffect(() => {
@@ -366,7 +366,9 @@ export default function LeadDetailPanel({
     setLoadingObservations(true)
     const token = localStorage.getItem('token')
     try {
-      const url = contactMode && contactId
+      const url = eventMode && participantId
+        ? `/api/interactions?participant_id=${participantId}&limit=100`
+        : contactMode && contactId
         ? `/api/contacts/${contactId}/interactions?limit=100`
         : `/api/leads/${leadId}/interactions?limit=100`
       const res = await fetch(url, {
@@ -593,13 +595,25 @@ export default function LeadDetailPanel({
     setSavingObservation(true)
     const token = localStorage.getItem('token')
     try {
+      const leadIdForObservation = eventMode
+        ? ((lead as any).original_lead_id || null)
+        : lead.id
+      const payload = eventMode
+        ? {
+            event_id: eventId,
+            participant_id: participantId,
+            contact_id: lead.contact_id,
+            lead_id: leadIdForObservation,
+            type: newObservationType,
+            notes: newObservation.trim(),
+          }
+        : contactMode && contactId
+        ? { contact_id: contactId, type: newObservationType, notes: newObservation.trim() }
+        : { lead_id: lead.id, type: newObservationType, notes: newObservation.trim() }
       const res = await fetch('/api/interactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(contactMode && contactId
-          ? { contact_id: contactId, type: newObservationType, notes: newObservation.trim() }
-          : { lead_id: lead.id, type: newObservationType, notes: newObservation.trim() }
-        ),
+        body: JSON.stringify(payload),
       })
       const data = await res.json()
       if (data.success) {
@@ -655,18 +669,38 @@ export default function LeadDetailPanel({
   }
 
   const handleRequestHistorySync = async () => {
-    if (syncingHistory || !lead.jid) return
+    const cleanPhone = (lead.phone || '').replace(/[^0-9]/g, '')
+    if (syncingHistory || !cleanPhone) {
+      alert('Este registro no tiene un número válido para sincronizar historial')
+      return
+    }
     setSyncingHistory(true)
     try {
       const token = localStorage.getItem('token')
-      // First, find or create the chat for this lead's JID
-      const findRes = await fetch(`/api/chats/find-by-phone/${encodeURIComponent(lead.phone)}`, {
+      // First, find or create the chat for this person's phone number.
+      const findRes = await fetch(`/api/chats/find-by-phone/${encodeURIComponent(cleanPhone)}`, {
         headers: { Authorization: `Bearer ${token}` }
       })
       const findData = await findRes.json()
-      const chatId = findData?.chat?.id
+      let chatId = findData?.chat?.id
       if (!chatId) {
-        console.error('[HistorySync] No chat found for lead')
+        const devicesRes = await fetch('/api/devices', {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+        const devicesData = await devicesRes.json()
+        const connected = (devicesData.devices || []).filter((d: any) => d.status === 'connected')
+        if (connected.length === 1) {
+          const createRes = await fetch('/api/chats/new', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ device_id: connected[0].id, phone: cleanPhone }),
+          })
+          const createData = await createRes.json()
+          chatId = createData?.chat?.id
+        }
+      }
+      if (!chatId) {
+        alert('No encontré un chat para este número. Abre primero el chat con "Enviar WhatsApp" y vuelve a sincronizar.')
         return
       }
       const res = await fetch(`/api/chats/${chatId}/sync-history`, {
@@ -1392,6 +1426,7 @@ export default function LeadDetailPanel({
         )}
 
         {/* Notes */}
+        {!eventMode && (
         <div className="border-t border-slate-100 pt-4">
           <div className="flex items-center justify-between mb-3">
             <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Notas</h5>
@@ -1420,6 +1455,7 @@ export default function LeadDetailPanel({
             </div>
           )}
         </div>
+        )}
 
         {/* Actions */}
         <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
@@ -1691,7 +1727,9 @@ export default function LeadDetailPanel({
         isOpen={showHistoryModal}
         onClose={() => setShowHistoryModal(false)}
         leadId={lead.id}
-        contactId={contactMode ? contactId : undefined}
+        participantId={eventMode ? participantId : undefined}
+        eventId={eventMode ? eventId : undefined}
+        contactId={eventMode ? lead.contact_id : contactMode ? contactId : undefined}
         name={lead.name || 'Sin nombre'}
         observations={observations}
         onObservationChange={() => { fetchObservations(lead.id); onObservationChange?.(lead.id) }}
