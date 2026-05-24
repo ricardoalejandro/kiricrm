@@ -443,6 +443,7 @@ func (s *Server) setupRoutes() {
 	campaigns.Put("/:id/attachments", s.handleUpdateCampaignAttachments)
 
 	// Import CSV route
+	protected.Post("/import/csv/preview", s.handlePreviewImportCSV)
 	protected.Post("/import/csv", s.handleImportCSV)
 
 	// Contact routes
@@ -6042,351 +6043,812 @@ func (s *Server) handleReorderPipelineStages(c *fiber.Ctx) error {
 
 // --- Import CSV Handler ---
 
+type csvImportPreviewRow struct {
+	Row            int    `json:"row"`
+	Action         string `json:"action"`
+	Reason         string `json:"reason,omitempty"`
+	Name           string `json:"name,omitempty"`
+	Phone          string `json:"phone,omitempty"`
+	KommoID        *int64 `json:"kommo_id,omitempty"`
+	ExistingLeadID string `json:"existing_lead_id,omitempty"`
+}
+
+type csvImportSummary struct {
+	ImportType          string                `json:"import_type"`
+	Source              string                `json:"source"`
+	FileName            string                `json:"file_name"`
+	TotalRows           int                   `json:"total_rows"`
+	New                 int                   `json:"new"`
+	Existing            int                   `json:"existing"`
+	Created             int                   `json:"created"`
+	Updated             int                   `json:"updated"`
+	Skipped             int                   `json:"skipped"`
+	Duplicates          int                   `json:"duplicates"`
+	ErrorCount          int                   `json:"error_count"`
+	NewContacts         int                   `json:"new_contacts"`
+	SafeMode            bool                  `json:"safe_mode"`
+	IncomingDestination string                `json:"incoming_destination,omitempty"`
+	Rows                []csvImportPreviewRow `json:"rows,omitempty"`
+	Errors              []string              `json:"errors"`
+}
+
+type csvImportRecord struct {
+	RowNum             int
+	Action             string
+	Reason             string
+	KommoID            *int64
+	Phone              string
+	JID                string
+	Name               string
+	LastName           string
+	Email              string
+	Company            string
+	Notes              string
+	DNI                string
+	BirthDate          *time.Time
+	Tags               []string
+	CustomFields       map[string]interface{}
+	ExistingLeadID     *uuid.UUID
+	ExistingContactID  *uuid.UUID
+	LinkKommoToLead    bool
+	WillCreateContact  bool
+	ExistingLeadIDText string
+}
+
+type csvImportPlan struct {
+	Summary csvImportSummary
+	Records []csvImportRecord
+}
+
+func (s *Server) handlePreviewImportCSV(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	importType, fileName, rawBytes, status, errMsg := readCSVImportUpload(c)
+	if errMsg != "" {
+		return c.Status(status).JSON(fiber.Map{"success": false, "error": errMsg})
+	}
+	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, fileName, rawBytes)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "preview": plan.Summary})
+}
+
 func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID, _ := c.Locals("user_id").(uuid.UUID)
+	importType, fileName, rawBytes, status, errMsg := readCSVImportUpload(c)
+	if errMsg != "" {
+		return c.Status(status).JSON(fiber.Map{"success": false, "error": errMsg})
+	}
 
-	importType := c.FormValue("import_type") // "leads", "contacts", "both"
+	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, fileName, rawBytes)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if plan.Summary.NewContacts > 0 {
+		if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", plan.Summary.NewContacts); err != nil {
+			return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
+		}
+	}
+
+	result := s.executeCSVImportPlan(c.Context(), accountID, plan)
+	s.recordCSVImportLog(c.Context(), accountID, userID, result)
+
+	if result.Created > 0 || result.Updated > 0 {
+		s.invalidateLeadsCache(accountID)
+		s.invalidateContactsCache(accountID)
+		s.invalidateTagsCache(accountID)
+	}
+	if result.Created > 0 {
+		go s.services.Event.ReconcileAllAccountEvents(context.Background(), accountID)
+	}
+
+	return c.JSON(fiber.Map{
+		"success":      true,
+		"imported":     result.Created + result.Updated,
+		"created":      result.Created,
+		"updated":      result.Updated,
+		"existing":     result.Existing,
+		"skipped":      result.Skipped,
+		"duplicates":   result.Duplicates,
+		"new_contacts": result.NewContacts,
+		"errors":       result.Errors,
+		"summary":      result,
+	})
+}
+
+func readCSVImportUpload(c *fiber.Ctx) (string, string, []byte, int, string) {
+	importType := c.FormValue("import_type")
 	if importType == "" {
 		importType = "leads"
 	}
 	if importType != "leads" && importType != "contacts" && importType != "both" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "import_type must be 'leads', 'contacts', or 'both'"})
+		return "", "", nil, fiber.StatusBadRequest, "import_type must be 'leads', 'contacts', or 'both'"
 	}
-
 	file, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "CSV file is required"})
+		return "", "", nil, fiber.StatusBadRequest, "CSV file is required"
 	}
-
 	f, err := file.Open()
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Cannot read file"})
+		return "", "", nil, fiber.StatusInternalServerError, "Cannot read file"
 	}
 	defer f.Close()
-
-	// Read all content into memory to detect separators
 	rawBytes, err := io.ReadAll(f)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Cannot read file content"})
+		return "", "", nil, fiber.StatusInternalServerError, "Cannot read file content"
 	}
-	rawContent := string(rawBytes)
-	lines := strings.Split(rawContent, "\n")
-	if len(lines) < 2 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "CSV file must have at least a header and one data row"})
-	}
-	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", countNonEmptyCSVRows(lines)); err != nil {
-		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
-	}
+	return importType, file.Filename, rawBytes, fiber.StatusOK, ""
+}
 
-	// Detect separator: Kommo uses commas in header, semicolons in data.
-	// General approach: check which delimiter produces more columns consistently.
-	headerLine := strings.TrimSpace(lines[0])
-	dataLine := ""
-	for _, l := range lines[1:] {
-		trimmed := strings.TrimSpace(l)
-		if trimmed != "" {
-			dataLine = trimmed
-			break
-		}
+func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, importType, fileName string, rawBytes []byte) (*csvImportPlan, error) {
+	rawContent := strings.TrimPrefix(string(rawBytes), "\ufeff")
+	headerLine, dataContent := splitCSVHeader(rawContent)
+	if strings.TrimSpace(headerLine) == "" || strings.TrimSpace(dataContent) == "" {
+		return nil, fmt.Errorf("CSV file must have at least a header and one data row")
 	}
 
 	headerSep := detectCSVSeparator(headerLine)
-	dataSep := detectCSVSeparator(dataLine)
-
-	// Parse header with its detected separator
-	headerReader := csv.NewReader(strings.NewReader(headerLine))
-	headerReader.Comma = headerSep
-	headerReader.LazyQuotes = true
-	headerReader.TrimLeadingSpace = true
-	headers, err := headerReader.Read()
+	headers, err := readCSVRecord(headerLine, headerSep)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Cannot parse CSV headers"})
+		return nil, fmt.Errorf("cannot parse CSV headers")
+	}
+	firstDataRow, firstDataLine := firstCSVDataRow(dataContent)
+	dataSep := detectCSVSeparator(firstDataLine)
+	if len(firstDataRow) == 0 {
+		return nil, fmt.Errorf("CSV file must have at least one data row")
 	}
 
-	// Build column mapping (case-insensitive, trimmed)
 	colMap := make(map[string]int)
 	for i, h := range headers {
-		key := strings.ToLower(strings.TrimSpace(h))
+		key := normalizeImportHeader(h)
 		if key != "" {
 			colMap[key] = i
 		}
 	}
 
-	// Find phone column by name
-	phoneCol := -1
-	for _, key := range []string{"phone", "telefono", "teléfono", "celular", "número", "numero", "movil", "móvil"} {
-		if idx, ok := colMap[key]; ok {
-			phoneCol = idx
-			break
-		}
-	}
-
-	// If phone column not found by name, scan first data row for phone-like values
-	// (Kommo exports have unlabeled phone columns containing '+51XXXXXXXXX)
-	if phoneCol == -1 && dataLine != "" {
-		dataReader := csv.NewReader(strings.NewReader(dataLine))
-		dataReader.Comma = dataSep
-		dataReader.LazyQuotes = true
-		dataReader.TrimLeadingSpace = true
-		if testRow, err := dataReader.Read(); err == nil {
-			bestCol := -1
-			bestScore := 0
-			for i, val := range testRow {
-				// Skip columns with known non-phone headers
-				if i < len(headers) {
-					hdr := strings.ToLower(strings.TrimSpace(headers[i]))
-					if hdr == "id" || hdr == "edad" || hdr == "age" || hdr == "dni" || hdr == "dni_ce" {
-						continue
-					}
-				}
-				raw := strings.TrimSpace(val)
-				cleaned := strings.Trim(raw, "'\"")
-				hasPlus := strings.HasPrefix(cleaned, "+")
-				hasTick := strings.HasPrefix(raw, "'") || strings.HasPrefix(raw, "\"'")
-				cleaned = strings.ReplaceAll(cleaned, " ", "")
-				cleaned = strings.ReplaceAll(cleaned, "-", "")
-				cleaned = strings.TrimPrefix(cleaned, "+")
-				if len(cleaned) < 8 || len(cleaned) > 15 {
-					continue
-				}
-				allDigits := true
-				for _, ch := range cleaned {
-					if ch < '0' || ch > '9' {
-						allDigits = false
-						break
-					}
-				}
-				if !allDigits {
-					continue
-				}
-				// Score: prefer values with + prefix or tick marks (phone formatting)
-				// and columns with empty headers (unlabeled = likely phone in Kommo)
-				score := 1
-				if hasPlus || hasTick {
-					score += 10
-				}
-				if i < len(headers) && strings.TrimSpace(headers[i]) == "" {
-					score += 5
-				}
-				if len(cleaned) >= 10 {
-					score += 2 // longer numbers more likely phone
-				}
-				if score > bestScore {
-					bestScore = score
-					bestCol = i
-				}
-			}
-			phoneCol = bestCol
-		}
-	}
-
+	phoneCol := findCol(colMap, "phone", "telefono", "teléfono", "celular", "número", "numero", "movil", "móvil")
 	if phoneCol == -1 {
-		return c.Status(400).JSON(fiber.Map{
-			"success": false,
-			"error":   "CSV must have a phone/telefono/celular column",
-		})
+		phoneCol = detectPhoneColumn(headers, firstDataRow)
+	}
+	if phoneCol == -1 {
+		return nil, fmt.Errorf("CSV must have a phone/telefono/celular column or a Kommo phone column")
 	}
 
-	// Map known columns (supports Kommo naming)
-	nameCol := findCol(colMap, "name", "nombre", "nombre_completo", "nombre completo")
-	emailCol := findCol(colMap, "email", "correo", "e-mail", "e-mail priv.")
-	notesCol := findCol(colMap, "notes", "notas", "observaciones")
+	idCol := findCol(colMap, "id", "kommo id", "kommo_id", "lead id", "id lead")
+	nameCol := findCol(colMap, "nombre completo", "name", "nombre", "nombre_completo")
+	leadNameCol := findCol(colMap, "nombre del lead", "lead name")
+	emailCol := findCol(colMap, "email", "correo", "e-mail", "e-mail priv.", "otro e-mail")
+	notesCol := findCol(colMap, "notes", "notas", "observaciones", "nota")
 	tagsCol := findCol(colMap, "tags", "etiquetas")
 	companyCol := findCol(colMap, "company", "empresa")
 	lastNameCol := findCol(colMap, "last_name", "apellido", "apellidos")
 	dniCol := findCol(colMap, "dni", "documento", "doc_identidad")
 	birthDateCol := findCol(colMap, "fecha_nacimiento", "birth_date", "nacimiento", "cumpleanos", "cumpleaños")
-	stageCol := findCol(colMap, "estatus del lead", "stage", "etapa", "estado lead", "status")
-	_ = findCol(colMap, "embudo de ventas", "pipeline", "embudo") // reserved for future multi-pipeline import
-	_ = findCol(colMap, "edad", "age")                            // age managed via contacts
+	kommoFieldCols := kommoCSVFieldColumns(colMap)
 
-	// Get default pipeline for stage assignment
-	defaultPipeline, _ := s.services.Pipeline.GetDefaultPipeline(c.Context(), accountID)
-
-	imported := 0
-	skipped := 0
-	var importErrors []string
-
-	// Parse data rows using the data separator
-	for i := 1; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
+	plan := &csvImportPlan{
+		Summary: csvImportSummary{
+			ImportType: importType,
+			Source:     detectImportSource(colMap),
+			FileName:   fileName,
+			SafeMode:   true,
+		},
+	}
+	if pid, sid, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID); err == nil && pid != nil && sid != nil {
+		var stageName string
+		_ = s.repos.DB().QueryRow(ctx, `SELECT name FROM pipeline_stages WHERE id = $1`, *sid).Scan(&stageName)
+		if stageName != "" {
+			plan.Summary.IncomingDestination = stageName
 		}
-		rowReader := csv.NewReader(strings.NewReader(line))
-		rowReader.Comma = dataSep
-		rowReader.LazyQuotes = true
-		rowReader.TrimLeadingSpace = true
+	}
 
-		row, err := rowReader.Read()
+	reader := csv.NewReader(strings.NewReader(dataContent))
+	reader.Comma = dataSep
+	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+
+	seenKommoIDs := map[int64]bool{}
+	seenNewJIDs := map[string]bool{}
+	rowNum := 1
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		rowNum++
 		if err != nil {
-			skipped++
+			plan.Summary.Skipped++
+			plan.Summary.ErrorCount++
+			plan.Summary.Errors = append(plan.Summary.Errors, fmt.Sprintf("fila %d: no se pudo leer (%v)", rowNum, err))
+			plan.addPreview(csvImportPreviewRow{Row: rowNum, Action: "skip", Reason: "No se pudo leer la fila"})
 			continue
 		}
-
-		phone := safeCol(row, phoneCol)
-		if phone == "" {
-			skipped++
+		if rowIsEmpty(row) {
 			continue
 		}
+		plan.Summary.TotalRows++
 
-		// Normalize phone: remove quotes, ticks, spaces, dashes
-		phone = strings.Trim(phone, "'\"` ")
-		phone = strings.ReplaceAll(phone, " ", "")
-		phone = strings.ReplaceAll(phone, "-", "")
-		phone = strings.ReplaceAll(phone, "(", "")
-		phone = strings.ReplaceAll(phone, ")", "")
-		phone = strings.TrimPrefix(phone, "+")
-		if phone == "" || len(phone) < 6 {
-			skipped++
+		record := csvImportRecord{RowNum: rowNum, Action: "create"}
+		record.Phone = kommo.NormalizePhone(safeCol(row, phoneCol))
+		if record.Phone == "" || len(record.Phone) < 6 {
+			record.Action = "skip"
+			record.Reason = "Sin teléfono válido"
+			plan.Summary.Skipped++
+			plan.addPreview(csvImportPreviewRow{Row: rowNum, Action: "skip", Reason: record.Reason})
+			plan.Records = append(plan.Records, record)
 			continue
 		}
-
-		jid := phone + "@s.whatsapp.net"
-
-		name := safeCol(row, nameCol)
-		email := safeCol(row, emailCol)
-		notes := safeCol(row, notesCol)
-		tags := safeCol(row, tagsCol)
-		company := safeCol(row, companyCol)
-		lastName := safeCol(row, lastNameCol)
-		stageName := safeCol(row, stageCol)
-		dni := safeCol(row, dniCol)
-		birthDateStr := safeCol(row, birthDateCol)
-
-		if importType == "contacts" || importType == "both" {
-			contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, name, "", false)
-			if err != nil {
-				importErrors = append(importErrors, fmt.Sprintf("row %d contact: %s", i+1, err.Error()))
-			} else if contact != nil {
-				needUpdate := false
-				if email != "" && (contact.Email == nil || *contact.Email == "") {
-					contact.Email = &email
-					needUpdate = true
-				}
-				if company != "" && (contact.Company == nil || *contact.Company == "") {
-					contact.Company = &company
-					needUpdate = true
-				}
-				if lastName != "" && (contact.LastName == nil || *contact.LastName == "") {
-					contact.LastName = &lastName
-					needUpdate = true
-				}
-				if notes != "" && (contact.Notes == nil || *contact.Notes == "") {
-					contact.Notes = &notes
-					needUpdate = true
-				}
-				if dni != "" && (contact.DNI == nil || *contact.DNI == "") {
-					contact.DNI = &dni
-					needUpdate = true
-				}
-				if birthDateStr != "" && contact.BirthDate == nil {
-					if bd, err := time.Parse("2006-01-02", birthDateStr); err == nil {
-						contact.BirthDate = &bd
-						needUpdate = true
-					}
-				}
-				if needUpdate {
-					s.services.Contact.Update(c.Context(), contact)
-				}
-			}
+		record.JID = record.Phone + "@s.whatsapp.net"
+		record.KommoID = parseOptionalInt64(safeCol(row, idCol))
+		record.Name = cleanCSVValue(safeCol(row, nameCol))
+		if record.Name == "" {
+			record.Name = cleanLeadNameFallback(safeCol(row, leadNameCol))
 		}
-		if importType == "leads" || importType == "both" {
-			// Ensure contact exists (personal data lives on contacts)
-			csvContact, _ := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, name, "", false)
-			if csvContact != nil {
-				needUpdate := false
-				if email != "" && (csvContact.Email == nil || *csvContact.Email == "") {
-					csvContact.Email = &email
-					needUpdate = true
-				}
-				if company != "" && (csvContact.Company == nil || *csvContact.Company == "") {
-					csvContact.Company = &company
-					needUpdate = true
-				}
-				if lastName != "" && (csvContact.LastName == nil || *csvContact.LastName == "") {
-					csvContact.LastName = &lastName
-					needUpdate = true
-				}
-				if notes != "" && (csvContact.Notes == nil || *csvContact.Notes == "") {
-					csvContact.Notes = &notes
-					needUpdate = true
-				}
-				if dni != "" && (csvContact.DNI == nil || *csvContact.DNI == "") {
-					csvContact.DNI = &dni
-					needUpdate = true
-				}
-				if birthDateStr != "" && csvContact.BirthDate == nil {
-					if bd, err := time.Parse("2006-01-02", birthDateStr); err == nil {
-						csvContact.BirthDate = &bd
-						needUpdate = true
-					}
-				}
-				if needUpdate {
-					s.services.Contact.Update(c.Context(), csvContact)
-				}
-			}
-			lead := &domain.Lead{
-				AccountID: accountID,
-				JID:       jid,
-				Source:    strPtr("csv_import"),
-				Status:    strPtr(domain.LeadStatusNew),
-			}
-			if csvContact != nil {
-				lead.ContactID = &csvContact.ID
-			}
+		record.Email = cleanCSVValue(safeCol(row, emailCol))
+		record.Notes = cleanCSVValue(safeCol(row, notesCol))
+		record.Company = cleanCSVValue(safeCol(row, companyCol))
+		record.LastName = cleanCSVValue(safeCol(row, lastNameCol))
+		record.DNI = cleanCSVValue(safeCol(row, dniCol))
+		record.BirthDate = parseImportDate(safeCol(row, birthDateCol))
+		record.Tags = splitImportTags(safeCol(row, tagsCol))
+		record.CustomFields = extractKommoCustomFields(row, headers, kommoFieldCols)
 
-			// Assign pipeline stage if available
-			if stageName != "" && defaultPipeline != nil && defaultPipeline.Stages != nil {
-				for _, st := range defaultPipeline.Stages {
-					if strings.EqualFold(st.Name, stageName) {
-						lead.PipelineID = &defaultPipeline.ID
-						lead.StageID = &st.ID
-						break
-					}
-				}
+		if record.KommoID != nil {
+			if seenKommoIDs[*record.KommoID] {
+				record.Action = "skip"
+				record.Reason = "ID de Kommo duplicado dentro del archivo"
+				plan.Summary.Skipped++
+				plan.Summary.Duplicates++
+				plan.addPreview(record.previewRow())
+				plan.Records = append(plan.Records, record)
+				continue
 			}
-			// Fallback: use the account incoming default when CSV did not provide a matching stage.
-			if lead.PipelineID == nil {
-				pipelineID, resolvedStageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(c.Context(), accountID)
-				if err == nil {
-					lead.PipelineID = pipelineID
-					lead.StageID = resolvedStageID
-				}
-			}
-
-			if tags != "" {
-				// Kommo uses ", " as tag separator within the cell
-				tagList := strings.Split(tags, ",")
-				for j := range tagList {
-					tagList[j] = strings.TrimSpace(tagList[j])
-				}
-				lead.Tags = tagList
-			}
-			if err := s.services.Lead.Create(c.Context(), lead); err != nil {
-				importErrors = append(importErrors, fmt.Sprintf("row %d lead: %s", i+1, err.Error()))
-			} else if len(lead.Tags) > 0 {
-				// Populate contact_tags so event formulas can match
-				s.repos.Tag.SyncLeadTagsByNames(c.Context(), accountID, lead.ID, lead.Tags)
-			}
+			seenKommoIDs[*record.KommoID] = true
 		}
 
-		imported++
+		leadID, leadContactID, linkKommo, err := s.findCSVImportLead(ctx, accountID, record.KommoID, record.JID)
+		if err != nil {
+			record.Action = "skip"
+			record.Reason = err.Error()
+			plan.Summary.Skipped++
+			plan.Summary.ErrorCount++
+			plan.Summary.Errors = append(plan.Summary.Errors, fmt.Sprintf("fila %d: %s", rowNum, err.Error()))
+			plan.addPreview(record.previewRow())
+			plan.Records = append(plan.Records, record)
+			continue
+		}
+		record.ExistingLeadID = leadID
+		record.LinkKommoToLead = linkKommo
+		if leadID != nil {
+			record.Action = "update_existing"
+			record.ExistingLeadIDText = leadID.String()
+			plan.Summary.Existing++
+		} else {
+			if seenNewJIDs[record.JID] {
+				record.Action = "skip"
+				record.Reason = "Teléfono duplicado dentro del archivo"
+				plan.Summary.Skipped++
+				plan.Summary.Duplicates++
+				plan.addPreview(record.previewRow())
+				plan.Records = append(plan.Records, record)
+				continue
+			}
+			seenNewJIDs[record.JID] = true
+			plan.Summary.New++
+		}
+
+		contactID, err := s.findCSVImportContact(ctx, accountID, record.JID)
+		if err != nil {
+			record.Action = "skip"
+			record.Reason = err.Error()
+			plan.Summary.Skipped++
+			plan.Summary.ErrorCount++
+			plan.Summary.Errors = append(plan.Summary.Errors, fmt.Sprintf("fila %d: %s", rowNum, err.Error()))
+			plan.addPreview(record.previewRow())
+			plan.Records = append(plan.Records, record)
+			continue
+		}
+		if contactID == nil && leadContactID != nil {
+			contactID = leadContactID
+		}
+		record.ExistingContactID = contactID
+		if contactID == nil && (importType == "leads" || importType == "contacts" || importType == "both") {
+			record.WillCreateContact = true
+			plan.Summary.NewContacts++
+		}
+
+		plan.addPreview(record.previewRow())
+		plan.Records = append(plan.Records, record)
 	}
+	return plan, nil
+}
 
-	s.invalidateLeadsCache(accountID)
-
-	// Reconcile event participants after CSV import (new leads with tags)
-	if imported > 0 {
-		go s.services.Event.ReconcileAllAccountEvents(context.Background(), accountID)
+func (p *csvImportPlan) addPreview(row csvImportPreviewRow) {
+	if len(p.Summary.Rows) < 50 {
+		p.Summary.Rows = append(p.Summary.Rows, row)
 	}
+}
 
-	return c.JSON(fiber.Map{
-		"success":  true,
-		"imported": imported,
-		"skipped":  skipped,
-		"errors":   importErrors,
+func (r csvImportRecord) previewRow() csvImportPreviewRow {
+	row := csvImportPreviewRow{
+		Row:            r.RowNum,
+		Action:         r.Action,
+		Reason:         r.Reason,
+		Name:           r.Name,
+		Phone:          r.Phone,
+		KommoID:        r.KommoID,
+		ExistingLeadID: r.ExistingLeadIDText,
+	}
+	if row.Reason == "" {
+		switch r.Action {
+		case "create":
+			row.Reason = "Nuevo lead; usará la etapa entrante configurada"
+		case "update_existing":
+			row.Reason = "Existente; no se moverá de etapa ni se reemplazarán tags/notas"
+		}
+	}
+	return row
+}
+
+func (s *Server) executeCSVImportPlan(ctx context.Context, accountID uuid.UUID, plan *csvImportPlan) csvImportSummary {
+	result := plan.Summary
+	result.Created = 0
+	result.Updated = 0
+	for _, record := range plan.Records {
+		if record.Action == "skip" {
+			continue
+		}
+		contact, contactCreated, contactUpdated, err := s.ensureCSVImportContact(ctx, accountID, record)
+		if err != nil {
+			result.Skipped++
+			result.ErrorCount++
+			result.Errors = append(result.Errors, fmt.Sprintf("fila %d: contacto: %s", record.RowNum, err.Error()))
+			continue
+		}
+		if contactCreated {
+			// Already included in preview NewContacts; no extra counter needed here.
+		}
+		if record.Action == "update_existing" {
+			if record.ExistingLeadID != nil {
+				var contactID *uuid.UUID
+				if contact != nil {
+					contactID = &contact.ID
+				}
+				if err := s.linkCSVImportLead(ctx, *record.ExistingLeadID, contactID, record.KommoID); err != nil {
+					result.Skipped++
+					result.ErrorCount++
+					result.Errors = append(result.Errors, fmt.Sprintf("fila %d: lead existente: %s", record.RowNum, err.Error()))
+					continue
+				}
+			}
+			if contactUpdated || record.LinkKommoToLead {
+				result.Updated++
+			} else {
+				result.Updated++
+			}
+			continue
+		}
+		if plan.Summary.ImportType == "contacts" {
+			if contactCreated {
+				result.Created++
+			} else {
+				result.Updated++
+			}
+			continue
+		}
+		if err := s.createCSVImportLead(ctx, accountID, record, contact); err != nil {
+			result.Skipped++
+			result.ErrorCount++
+			result.Errors = append(result.Errors, fmt.Sprintf("fila %d: lead: %s", record.RowNum, err.Error()))
+			continue
+		}
+		result.Created++
+	}
+	return result
+}
+
+func (s *Server) createCSVImportLead(ctx context.Context, accountID uuid.UUID, record csvImportRecord, contact *domain.Contact) error {
+	pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	source := "kommo_csv_import"
+	lead := &domain.Lead{
+		AccountID:    accountID,
+		JID:          record.JID,
+		Name:         strPtr(record.Name),
+		LastName:     strPtr(record.LastName),
+		Phone:        strPtr(record.Phone),
+		Email:        strPtr(record.Email),
+		Company:      strPtr(record.Company),
+		Notes:        strPtr(record.Notes),
+		DNI:          strPtr(record.DNI),
+		BirthDate:    record.BirthDate,
+		Status:       strPtr(domain.LeadStatusNew),
+		Source:       &source,
+		PipelineID:   pipelineID,
+		StageID:      stageID,
+		Tags:         record.Tags,
+		CustomFields: record.CustomFields,
+		KommoID:      record.KommoID,
+	}
+	if contact != nil {
+		lead.ContactID = &contact.ID
+	}
+	if err := s.services.Lead.Create(ctx, lead); err != nil {
+		return err
+	}
+	if len(record.Tags) > 0 {
+		if err := s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, lead.ID, record.Tags); err != nil {
+			log.Printf("[CSV Import] Failed to sync tags for lead %s: %v", lead.ID, err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) ensureCSVImportContact(ctx context.Context, accountID uuid.UUID, record csvImportRecord) (*domain.Contact, bool, bool, error) {
+	contact, err := s.repos.Contact.GetByJID(ctx, accountID, record.JID)
+	if err != nil {
+		return nil, false, false, err
+	}
+	created := false
+	if contact == nil {
+		contact, err = s.repos.Contact.GetOrCreate(ctx, accountID, nil, record.JID, record.Phone, record.Name, "", false)
+		if err != nil {
+			return nil, false, false, err
+		}
+		created = true
+	}
+	updated := fillEmptyContactFields(contact, record)
+	if updated {
+		if err := s.repos.Contact.Update(ctx, contact); err != nil {
+			return nil, created, false, err
+		}
+	}
+	return contact, created, updated, nil
+}
+
+func fillEmptyContactFields(contact *domain.Contact, record csvImportRecord) bool {
+	changed := false
+	if record.Name != "" && stringPtrEmpty(contact.Name) && stringPtrEmpty(contact.CustomName) {
+		contact.Name = strPtr(record.Name)
+		changed = true
+	}
+	if record.LastName != "" && stringPtrEmpty(contact.LastName) {
+		contact.LastName = strPtr(record.LastName)
+		changed = true
+	}
+	if record.Email != "" && stringPtrEmpty(contact.Email) {
+		contact.Email = strPtr(record.Email)
+		changed = true
+	}
+	if record.Company != "" && stringPtrEmpty(contact.Company) {
+		contact.Company = strPtr(record.Company)
+		changed = true
+	}
+	if record.Notes != "" && stringPtrEmpty(contact.Notes) {
+		contact.Notes = strPtr(record.Notes)
+		changed = true
+	}
+	if record.DNI != "" && stringPtrEmpty(contact.DNI) {
+		contact.DNI = strPtr(record.DNI)
+		changed = true
+	}
+	if record.BirthDate != nil && contact.BirthDate == nil {
+		contact.BirthDate = record.BirthDate
+		changed = true
+	}
+	if stringPtrEmpty(contact.Source) {
+		contact.Source = strPtr("kommo_csv_import")
+		changed = true
+	}
+	return changed
+}
+
+func (s *Server) linkCSVImportLead(ctx context.Context, leadID uuid.UUID, contactID *uuid.UUID, kommoID *int64) error {
+	_, err := s.repos.DB().Exec(ctx, `
+		UPDATE leads SET
+			contact_id = COALESCE(contact_id, $1::uuid),
+			kommo_id = COALESCE(kommo_id, $2::bigint),
+			source = COALESCE(source, 'kommo_csv_import'),
+			kommo_deleted_at = CASE WHEN $2::bigint IS NOT NULL THEN NULL ELSE kommo_deleted_at END,
+			updated_at = CASE
+				WHEN (contact_id IS NULL AND $1::uuid IS NOT NULL)
+				  OR (kommo_id IS NULL AND $2::bigint IS NOT NULL)
+				  OR source IS NULL
+				THEN NOW()
+				ELSE updated_at
+			END
+		WHERE id = $3
+	`, contactID, kommoID, leadID)
+	return err
+}
+
+func (s *Server) findCSVImportLead(ctx context.Context, accountID uuid.UUID, kommoID *int64, jid string) (*uuid.UUID, *uuid.UUID, bool, error) {
+	var leadID uuid.UUID
+	var contactID *uuid.UUID
+	if kommoID != nil {
+		err := s.repos.DB().QueryRow(ctx, `
+			SELECT id, contact_id FROM leads
+			WHERE account_id = $1 AND kommo_id = $2
+			ORDER BY updated_at DESC LIMIT 1
+		`, accountID, *kommoID).Scan(&leadID, &contactID)
+		if err == nil {
+			return &leadID, contactID, false, nil
+		}
+		if err != pgx.ErrNoRows {
+			return nil, nil, false, err
+		}
+		var existingKommoID *int64
+		err = s.repos.DB().QueryRow(ctx, `
+			SELECT id, contact_id, kommo_id FROM leads
+			WHERE account_id = $1 AND jid = $2
+			ORDER BY (kommo_id IS NULL) DESC, updated_at DESC LIMIT 1
+		`, accountID, jid).Scan(&leadID, &contactID, &existingKommoID)
+		if err == nil {
+			return &leadID, contactID, existingKommoID == nil, nil
+		}
+		if err != pgx.ErrNoRows {
+			return nil, nil, false, err
+		}
+		return nil, nil, false, nil
+	}
+	err := s.repos.DB().QueryRow(ctx, `
+		SELECT id, contact_id FROM leads
+		WHERE account_id = $1 AND jid = $2
+		ORDER BY updated_at DESC LIMIT 1
+	`, accountID, jid).Scan(&leadID, &contactID)
+	if err == nil {
+		return &leadID, contactID, false, nil
+	}
+	if err != pgx.ErrNoRows {
+		return nil, nil, false, err
+	}
+	return nil, nil, false, nil
+}
+
+func (s *Server) findCSVImportContact(ctx context.Context, accountID uuid.UUID, jid string) (*uuid.UUID, error) {
+	var contactID uuid.UUID
+	err := s.repos.DB().QueryRow(ctx, `SELECT id FROM contacts WHERE account_id = $1 AND jid = $2`, accountID, jid).Scan(&contactID)
+	if err == nil {
+		return &contactID, nil
+	}
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return nil, err
+}
+
+func (s *Server) recordCSVImportLog(ctx context.Context, accountID, userID uuid.UUID, summary csvImportSummary) {
+	details, _ := json.Marshal(fiber.Map{
+		"incoming_destination": summary.IncomingDestination,
+		"safe_mode":            summary.SafeMode,
+		"errors":               summary.Errors,
 	})
+	_, err := s.repos.DB().Exec(ctx, `
+		INSERT INTO csv_import_logs (
+			account_id, uploaded_by, import_type, source, file_name, total_rows,
+			created_count, updated_count, existing_count, skipped_count,
+			duplicate_count, error_count, new_contacts_count, details
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	`, accountID, userID, summary.ImportType, summary.Source, summary.FileName, summary.TotalRows,
+		summary.Created, summary.Updated, summary.Existing, summary.Skipped,
+		summary.Duplicates, summary.ErrorCount, summary.NewContacts, details)
+	if err != nil {
+		log.Printf("[CSV Import] failed to write import log: %v", err)
+	}
+}
+
+func splitCSVHeader(rawContent string) (string, string) {
+	rawContent = strings.TrimLeft(rawContent, "\r\n\t ")
+	for i, ch := range rawContent {
+		if ch == '\n' {
+			header := strings.TrimRight(rawContent[:i], "\r")
+			return header, rawContent[i+1:]
+		}
+		if ch == '\r' {
+			header := rawContent[:i]
+			rest := rawContent[i+1:]
+			rest = strings.TrimPrefix(rest, "\n")
+			return header, rest
+		}
+	}
+	return rawContent, ""
+}
+
+func readCSVRecord(line string, sep rune) ([]string, error) {
+	reader := csv.NewReader(strings.NewReader(line))
+	reader.Comma = sep
+	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
+	return reader.Read()
+}
+
+func firstCSVDataRow(dataContent string) ([]string, string) {
+	for _, line := range strings.Split(dataContent, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		sep := detectCSVSeparator(trimmed)
+		row, err := readCSVRecord(trimmed, sep)
+		if err == nil {
+			return row, trimmed
+		}
+		return nil, trimmed
+	}
+	return nil, ""
+}
+
+func normalizeImportHeader(header string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(header, "\ufeff")))
+}
+
+func detectPhoneColumn(headers []string, row []string) int {
+	bestCol := -1
+	bestScore := 0
+	for i, val := range row {
+		if i < len(headers) {
+			hdr := normalizeImportHeader(headers[i])
+			if hdr == "id" || hdr == "edad" || hdr == "age" || hdr == "dni" || hdr == "dni_ce" {
+				continue
+			}
+		}
+		raw := strings.TrimSpace(val)
+		cleaned := strings.Trim(raw, "'\"` ")
+		hasPlus := strings.HasPrefix(cleaned, "+")
+		hasTick := strings.HasPrefix(raw, "'") || strings.HasPrefix(raw, "\"'")
+		normalized := kommo.NormalizePhone(cleaned)
+		if len(normalized) < 8 || len(normalized) > 15 {
+			continue
+		}
+		allDigits := true
+		for _, ch := range normalized {
+			if ch < '0' || ch > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if !allDigits {
+			continue
+		}
+		score := 1
+		if hasPlus || hasTick {
+			score += 10
+		}
+		if i < len(headers) && strings.TrimSpace(headers[i]) == "" {
+			score += 5
+		}
+		if len(normalized) >= 10 {
+			score += 2
+		}
+		if score > bestScore {
+			bestScore = score
+			bestCol = i
+		}
+	}
+	return bestCol
+}
+
+func detectImportSource(colMap map[string]int) string {
+	if _, hasLeadName := colMap["nombre del lead"]; hasLeadName {
+		if _, hasPipeline := colMap["embudo de ventas"]; hasPipeline {
+			return "kommo_csv"
+		}
+	}
+	return "csv"
+}
+
+func kommoCSVFieldColumns(colMap map[string]int) map[string]int {
+	keys := []string{
+		"estatus del lead", "embudo de ventas", "status", "detec cam", "grupo", "otras",
+		"prueba", "bot 1.0", "utm_content", "utm_medium", "utm_campaign", "utm_source",
+		"utm_term", "utm_referrer", "referrer", "gclientid", "gclid", "fbclid", "ttad_name", "ttad_id",
+	}
+	cols := make(map[string]int)
+	for _, key := range keys {
+		if idx, ok := colMap[key]; ok {
+			cols[key] = idx
+		}
+	}
+	return cols
+}
+
+func parseOptionalInt64(value string) *int64 {
+	value = strings.TrimSpace(strings.Trim(value, "'\"` "))
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return nil
+	}
+	return &parsed
+}
+
+func cleanCSVValue(value string) string {
+	return strings.TrimSpace(strings.Trim(value, "'\"` "))
+}
+
+func cleanLeadNameFallback(value string) string {
+	value = cleanCSVValue(value)
+	if strings.HasPrefix(strings.ToLower(value), "lead #") {
+		return ""
+	}
+	return value
+}
+
+func parseImportDate(value string) *time.Time {
+	value = cleanCSVValue(value)
+	if value == "" {
+		return nil
+	}
+	formats := []string{"2006-01-02", "02.01.2006", "02/01/2006", "02-01-2006", time.RFC3339}
+	for _, layout := range formats {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return &parsed
+		}
+	}
+	return nil
+}
+
+func splitImportTags(value string) []string {
+	value = cleanCSVValue(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	tags := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		tag := strings.TrimSpace(part)
+		if tag == "" {
+			continue
+		}
+		key := strings.ToLower(tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+func extractKommoCustomFields(row, headers []string, cols map[string]int) map[string]interface{} {
+	fields := map[string]interface{}{}
+	for normalizedHeader, idx := range cols {
+		value := cleanCSVValue(safeCol(row, idx))
+		if value == "" {
+			continue
+		}
+		key := "kommo_" + strings.NewReplacer(" ", "_", ".", "_", "-", "_").Replace(normalizedHeader)
+		fields[key] = value
+		if idx < len(headers) {
+			fields[key+"_label"] = strings.TrimSpace(headers[idx])
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+func rowIsEmpty(row []string) bool {
+	for _, value := range row {
+		if strings.TrimSpace(value) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func stringPtrEmpty(value *string) bool {
+	return value == nil || strings.TrimSpace(*value) == ""
 }
 
 // detectCSVSeparator counts commas, semicolons and tabs outside quotes and returns the most frequent one

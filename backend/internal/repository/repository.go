@@ -1880,10 +1880,12 @@ type LeadRepository struct {
 
 func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 	return r.db.QueryRow(ctx, `
-		INSERT INTO leads (account_id, contact_id, jid, name, phone, email, notes, dni, birth_date, status, source, pipeline_id, stage_id, tags, custom_fields, assigned_to)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		INSERT INTO leads (account_id, contact_id, jid, name, phone, email, notes, dni, birth_date, status, source, pipeline_id, stage_id, tags, custom_fields, assigned_to, kommo_id, kommo_synced_tags)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+		        CASE WHEN $17::bigint IS NOT NULL THEN COALESCE($14::text[], '{}'::text[]) ELSE '{}'::text[] END)
 		RETURNING id, created_at, updated_at
 	`, lead.AccountID, lead.ContactID, lead.JID, lead.Name, lead.Phone, lead.Email, lead.Notes, lead.DNI, lead.BirthDate, lead.Status, lead.Source, lead.PipelineID, lead.StageID, lead.Tags, lead.CustomFields, lead.AssignedTo,
+		lead.KommoID,
 	).Scan(&lead.ID, &lead.CreatedAt, &lead.UpdatedAt)
 }
 

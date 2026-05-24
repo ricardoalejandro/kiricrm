@@ -1525,6 +1525,26 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_sync_monitor_status_created ON sync_monitor_entries(status, created_at DESC) WHERE status <> ''`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_monitor_details_gin ON sync_monitor_entries USING GIN(details)`,
 
+		`CREATE TABLE IF NOT EXISTS csv_import_logs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			uploaded_by UUID,
+			import_type VARCHAR(32) NOT NULL DEFAULT 'leads',
+			source VARCHAR(50) NOT NULL DEFAULT 'csv',
+			file_name TEXT NOT NULL DEFAULT '',
+			total_rows INT NOT NULL DEFAULT 0,
+			created_count INT NOT NULL DEFAULT 0,
+			updated_count INT NOT NULL DEFAULT 0,
+			existing_count INT NOT NULL DEFAULT 0,
+			skipped_count INT NOT NULL DEFAULT 0,
+			duplicate_count INT NOT NULL DEFAULT 0,
+			error_count INT NOT NULL DEFAULT 0,
+			new_contacts_count INT NOT NULL DEFAULT 0,
+			details JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_csv_import_logs_account_created ON csv_import_logs(account_id, created_at DESC)`,
+
 		// Three-way merge baseline for tag sync (Clarin ↔ Kommo)
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_synced_tags TEXT[] DEFAULT '{}'`,
 		// Bootstrap: initialize baseline from current tags for existing Kommo-linked leads
