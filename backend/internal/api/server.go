@@ -6057,6 +6057,7 @@ type csvImportSummary struct {
 	ImportType          string                `json:"import_type"`
 	Source              string                `json:"source"`
 	FileName            string                `json:"file_name"`
+	ImportTag           string                `json:"import_tag,omitempty"`
 	TotalRows           int                   `json:"total_rows"`
 	New                 int                   `json:"new"`
 	Existing            int                   `json:"existing"`
@@ -6102,11 +6103,11 @@ type csvImportPlan struct {
 
 func (s *Server) handlePreviewImportCSV(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-	importType, fileName, rawBytes, status, errMsg := readCSVImportUpload(c)
+	importType, importTag, fileName, rawBytes, status, errMsg := readCSVImportUpload(c)
 	if errMsg != "" {
 		return c.Status(status).JSON(fiber.Map{"success": false, "error": errMsg})
 	}
-	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, fileName, rawBytes)
+	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -6116,12 +6117,12 @@ func (s *Server) handlePreviewImportCSV(c *fiber.Ctx) error {
 func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID, _ := c.Locals("user_id").(uuid.UUID)
-	importType, fileName, rawBytes, status, errMsg := readCSVImportUpload(c)
+	importType, importTag, fileName, rawBytes, status, errMsg := readCSVImportUpload(c)
 	if errMsg != "" {
 		return c.Status(status).JSON(fiber.Map{"success": false, "error": errMsg})
 	}
 
-	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, fileName, rawBytes)
+	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -6157,31 +6158,32 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	})
 }
 
-func readCSVImportUpload(c *fiber.Ctx) (string, string, []byte, int, string) {
+func readCSVImportUpload(c *fiber.Ctx) (string, string, string, []byte, int, string) {
 	importType := c.FormValue("import_type")
 	if importType == "" {
 		importType = "leads"
 	}
 	if importType != "leads" && importType != "contacts" && importType != "both" {
-		return "", "", nil, fiber.StatusBadRequest, "import_type must be 'leads', 'contacts', or 'both'"
+		return "", "", "", nil, fiber.StatusBadRequest, "import_type must be 'leads', 'contacts', or 'both'"
 	}
+	importTag := cleanCSVValue(c.FormValue("import_tag"))
 	file, err := c.FormFile("file")
 	if err != nil {
-		return "", "", nil, fiber.StatusBadRequest, "CSV file is required"
+		return "", "", "", nil, fiber.StatusBadRequest, "CSV file is required"
 	}
 	f, err := file.Open()
 	if err != nil {
-		return "", "", nil, fiber.StatusInternalServerError, "Cannot read file"
+		return "", "", "", nil, fiber.StatusInternalServerError, "Cannot read file"
 	}
 	defer f.Close()
 	rawBytes, err := io.ReadAll(f)
 	if err != nil {
-		return "", "", nil, fiber.StatusInternalServerError, "Cannot read file content"
+		return "", "", "", nil, fiber.StatusInternalServerError, "Cannot read file content"
 	}
-	return importType, file.Filename, rawBytes, fiber.StatusOK, ""
+	return importType, importTag, file.Filename, rawBytes, fiber.StatusOK, ""
 }
 
-func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, importType, fileName string, rawBytes []byte) (*csvImportPlan, error) {
+func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, importType, importTag, fileName string, rawBytes []byte) (*csvImportPlan, error) {
 	rawContent := strings.TrimPrefix(string(rawBytes), "\ufeff")
 	headerLine, dataContent := splitCSVHeader(rawContent)
 	if strings.TrimSpace(headerLine) == "" || strings.TrimSpace(dataContent) == "" {
@@ -6232,6 +6234,7 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 			ImportType: importType,
 			Source:     detectImportSource(colMap),
 			FileName:   fileName,
+			ImportTag:  importTag,
 			SafeMode:   true,
 		},
 	}
@@ -6438,7 +6441,7 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID uuid.UUID, 
 			}
 			continue
 		}
-		if err := s.createCSVImportLead(ctx, accountID, record, contact); err != nil {
+		if err := s.createCSVImportLead(ctx, accountID, record, contact, plan.Summary.ImportTag); err != nil {
 			result.Skipped++
 			result.ErrorCount++
 			result.Errors = append(result.Errors, fmt.Sprintf("fila %d: lead: %s", record.RowNum, err.Error()))
@@ -6449,12 +6452,13 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID uuid.UUID, 
 	return result
 }
 
-func (s *Server) createCSVImportLead(ctx context.Context, accountID uuid.UUID, record csvImportRecord, contact *domain.Contact) error {
+func (s *Server) createCSVImportLead(ctx context.Context, accountID uuid.UUID, record csvImportRecord, contact *domain.Contact, importTag string) error {
 	pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID)
 	if err != nil {
 		return err
 	}
 	source := "kommo_csv_import"
+	tags := appendImportTag(record.Tags, importTag)
 	lead := &domain.Lead{
 		AccountID:    accountID,
 		JID:          record.JID,
@@ -6470,7 +6474,7 @@ func (s *Server) createCSVImportLead(ctx context.Context, accountID uuid.UUID, r
 		Source:       &source,
 		PipelineID:   pipelineID,
 		StageID:      stageID,
-		Tags:         record.Tags,
+		Tags:         tags,
 		CustomFields: record.CustomFields,
 		KommoID:      record.KommoID,
 	}
@@ -6480,8 +6484,8 @@ func (s *Server) createCSVImportLead(ctx context.Context, accountID uuid.UUID, r
 	if err := s.services.Lead.Create(ctx, lead); err != nil {
 		return err
 	}
-	if len(record.Tags) > 0 {
-		if err := s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, lead.ID, record.Tags); err != nil {
+	if len(tags) > 0 {
+		if err := s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, lead.ID, tags); err != nil {
 			log.Printf("[CSV Import] Failed to sync tags for lead %s: %v", lead.ID, err)
 		}
 	}
@@ -6624,6 +6628,7 @@ func (s *Server) findCSVImportContact(ctx context.Context, accountID uuid.UUID, 
 func (s *Server) recordCSVImportLog(ctx context.Context, accountID, userID uuid.UUID, summary csvImportSummary) {
 	details, _ := json.Marshal(fiber.Map{
 		"incoming_destination": summary.IncomingDestination,
+		"import_tag":           summary.ImportTag,
 		"safe_mode":            summary.SafeMode,
 		"errors":               summary.Errors,
 	})
@@ -6817,6 +6822,31 @@ func splitImportTags(value string) []string {
 		tags = append(tags, tag)
 	}
 	return tags
+}
+
+func appendImportTag(tags []string, importTag string) []string {
+	importTag = cleanCSVValue(importTag)
+	if importTag == "" {
+		return tags
+	}
+	merged := make([]string, 0, len(tags)+1)
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		key := strings.ToLower(tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		merged = append(merged, tag)
+	}
+	if !seen[strings.ToLower(importTag)] {
+		merged = append(merged, importTag)
+	}
+	return merged
 }
 
 func extractKommoCustomFields(row, headers []string, cols map[string]int) map[string]interface{} {

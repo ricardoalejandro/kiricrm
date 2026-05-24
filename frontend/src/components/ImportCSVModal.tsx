@@ -24,6 +24,7 @@ interface ImportSummary {
   import_type: string
   source: string
   file_name: string
+  import_tag?: string
   total_rows: number
   new: number
   existing: number
@@ -41,6 +42,7 @@ interface ImportSummary {
 
 export default function ImportCSVModal({ open, onClose, onSuccess, defaultType = 'leads' }: ImportCSVModalProps) {
   const [file, setFile] = useState<File | null>(null)
+  const [importTag, setImportTag] = useState('')
   const [previewing, setPreviewing] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [preview, setPreview] = useState<ImportSummary | null>(null)
@@ -50,10 +52,11 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
 
   useEffect(() => {
     if (!open) return
+    setImportTag(defaultType === 'contacts' ? '' : `IMPORT KOMMO ${new Date().toISOString().slice(0, 10)}`)
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [open, onClose])
+  }, [open, onClose, defaultType])
 
   if (!open) return null
 
@@ -64,6 +67,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     const formData = new FormData()
     formData.append('file', file)
     formData.append('import_type', defaultType)
+    if (defaultType !== 'contacts' && importTag.trim()) formData.append('import_tag', importTag.trim())
     return formData
   }
 
@@ -137,6 +141,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     setError('')
     setPreviewing(false)
     setUploading(false)
+    setImportTag('')
     onClose()
   }
 
@@ -226,6 +231,9 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 <p className="text-emerald-700">Los leads existentes no se moverán de etapa ni perderán etiquetas, notas, tareas u observaciones.</p>
                 {preview.incoming_destination && (
                   <p className="text-emerald-700 mt-1">Los nuevos leads irán a: <span className="font-medium">{preview.incoming_destination}</span>.</p>
+                )}
+                {defaultType !== 'contacts' && preview.import_tag && (
+                  <p className="text-emerald-700 mt-1">Etiqueta para leads nuevos: <span className="font-medium">{preview.import_tag}</span>.</p>
                 )}
               </div>
             </div>
@@ -335,6 +343,19 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
               <p><span className="text-gray-500 font-medium">Kommo:</span> ID, Nombre completo, Correo, Etiquetas, Estatus del lead, Embudo de ventas</p>
               <p><span className="text-gray-500 font-medium">Seguro:</span> si reimportas, no se sobrescribe el trabajo hecho en Clarín</p>
             </div>
+
+            {defaultType !== 'contacts' && (
+              <div className="rounded-xl border border-slate-200 p-3.5">
+                <label className="text-xs font-semibold text-slate-500 uppercase">Etiqueta para nuevos leads importados</label>
+                <input
+                  value={importTag}
+                  onChange={e => setImportTag(e.target.value)}
+                  placeholder="Ej. IMPORT KOMMO 2026-05-24"
+                  className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
+                />
+                <p className="mt-2 text-xs text-slate-500">Se aplicará sólo a leads nuevos. Los existentes conservarán sus etiquetas actuales.</p>
+              </div>
+            )}
 
             <div className="flex gap-3 mt-5">
               <button onClick={handleClose} className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-600 rounded-xl hover:bg-gray-50 font-medium text-sm transition">
