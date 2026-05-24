@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Plus, Trash2, Edit, Tag, X, Check, LayoutGrid, List, Grid3X3, Search } from 'lucide-react'
+import { Plus, Trash2, Edit, Tag, X, Check, LayoutGrid, List, Grid3X3, Search, Loader2 } from 'lucide-react'
 
 interface TagItem {
   id: string
@@ -27,9 +27,11 @@ export default function TagsPage() {
   const [tags, setTags] = useState<TagItem[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [hasMore, setHasMore] = useState(false)
   const offsetRef = useRef(0)
+  const requestSeqRef = useRef(0)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -39,26 +41,30 @@ export default function TagsPage() {
   const [customColor, setCustomColor] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('grid')
   const [searchQuery, setSearchQuery] = useState('')
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
-  const fetchTags = useCallback(async (reset: boolean = true) => {
+  const fetchTags = useCallback(async (reset: boolean = true, search: string = debouncedSearchQuery) => {
     if (!token) return
     const offset = reset ? 0 : offsetRef.current
-    if (reset) setLoading(true)
+    const requestSeq = ++requestSeqRef.current
+    if (reset) setRefreshing(true)
     else setLoadingMore(true)
 
     try {
       const params = new URLSearchParams()
       params.set('limit', String(PAGE_SIZE))
       params.set('offset', String(offset))
-      if (searchQuery) params.set('search', searchQuery)
+      const trimmedSearch = search.trim()
+      if (trimmedSearch) params.set('search', trimmedSearch)
 
       const res = await fetch(`/api/tags?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
+      if (requestSeq !== requestSeqRef.current) return
       if (data.success) {
         const newTags: TagItem[] = data.tags || []
         const serverTotal: number = data.total ?? 0
@@ -80,16 +86,19 @@ export default function TagsPage() {
     } catch (err) {
       console.error('Failed to fetch tags:', err)
     } finally {
-      setLoading(false)
-      setLoadingMore(false)
+      if (requestSeq === requestSeqRef.current) {
+        setLoading(false)
+        setRefreshing(false)
+        setLoadingMore(false)
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, searchQuery])
+  }, [token, debouncedSearchQuery])
 
   const loadMore = useCallback(() => {
     if (loadingMore || !hasMore) return
-    fetchTags(false)
-  }, [loadingMore, hasMore, fetchTags])
+    fetchTags(false, debouncedSearchQuery)
+  }, [loadingMore, hasMore, fetchTags, debouncedSearchQuery])
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current
@@ -112,16 +121,15 @@ export default function TagsPage() {
     return () => observer.disconnect()
   }, [loadMore])
 
-  useEffect(() => { fetchTags() }, [fetchTags])
+  useEffect(() => { fetchTags(true, debouncedSearchQuery) }, [fetchTags, debouncedSearchQuery])
 
   // Debounced search
   useEffect(() => {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
     searchTimerRef.current = setTimeout(() => {
-      fetchTags(true)
+      setDebouncedSearchQuery(searchQuery)
     }, 300)
     return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery])
 
   // Close modals on Escape
@@ -249,8 +257,11 @@ export default function TagsPage() {
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder="Buscar etiquetas..."
-            className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 placeholder:text-gray-400"
+            className="w-full pl-9 pr-8 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 placeholder:text-gray-400"
           />
+          {refreshing && (
+            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-green-600 animate-spin" />
+          )}
         </div>
         <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
           <button
