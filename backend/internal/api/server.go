@@ -11628,6 +11628,7 @@ func (s *Server) handleAdminCreateAccount(c *fiber.Ctx) error {
 		Slug              string `json:"slug"`
 		Plan              string `json:"plan"`
 		MaxDevices        int    `json:"max_devices"`
+		MaxUsersOverride  *int   `json:"max_users_override"`
 		StorageLimitBytes int64  `json:"storage_limit_bytes"`
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -11642,12 +11643,16 @@ func (s *Server) handleAdminCreateAccount(c *fiber.Ctx) error {
 	if req.MaxDevices <= 0 {
 		req.MaxDevices = 5
 	}
+	if req.MaxUsersOverride != nil && *req.MaxUsersOverride < 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "max_users_override must be 0 or greater"})
+	}
 
 	account := &domain.Account{
 		Name:              req.Name,
 		Slug:              req.Slug,
 		Plan:              req.Plan,
 		MaxDevices:        req.MaxDevices,
+		MaxUsersOverride:  req.MaxUsersOverride,
 		StorageLimitBytes: req.StorageLimitBytes,
 		IsActive:          true,
 	}
@@ -11695,6 +11700,7 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		Slug              string `json:"slug"`
 		Plan              string `json:"plan"`
 		MaxDevices        int    `json:"max_devices"`
+		MaxUsersOverride  *int   `json:"max_users_override"`
 		StorageLimitBytes int64  `json:"storage_limit_bytes"`
 		MCPEnabled        bool   `json:"mcp_enabled"`
 		KommoEnabled      bool   `json:"kommo_enabled"`
@@ -11712,6 +11718,9 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		}
 		req.Plan = existing.Plan
 	}
+	if req.MaxUsersOverride != nil && *req.MaxUsersOverride < 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "max_users_override must be 0 or greater"})
+	}
 
 	account := &domain.Account{
 		ID:                id,
@@ -11719,6 +11728,7 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		Slug:              req.Slug,
 		Plan:              req.Plan,
 		MaxDevices:        req.MaxDevices,
+		MaxUsersOverride:  req.MaxUsersOverride,
 		StorageLimitBytes: req.StorageLimitBytes,
 		MCPEnabled:        req.MCPEnabled,
 		KommoEnabled:      req.KommoEnabled,

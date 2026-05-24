@@ -472,13 +472,17 @@ type AccountRepository struct {
 
 func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices, COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
+			a.max_users_override,
+			COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
+			COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
 			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
 			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
 		FROM accounts a
 		LEFT JOIN subscriptions s ON s.account_id = a.id
+		LEFT JOIN plan_entitlements pe ON pe.plan_code = COALESCE(s.plan_code, a.plan) AND pe.key = 'max_users'
 		ORDER BY a.created_at DESC
 	`)
 	if err != nil {
@@ -489,7 +493,7 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 	var accounts []*domain.Account
 	for rows.Next() {
 		a := &domain.Account{}
-		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.StorageLimitBytes, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
 			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
 			return nil, err
@@ -502,7 +506,10 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Account, error) {
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices, COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
+			a.max_users_override,
+			COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
+			COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
 			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
@@ -510,8 +517,9 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 			a.google_email, a.google_contact_group_id, a.google_connected_at, COALESCE(a.google_sync_limit, 20000)
 		FROM accounts a
 		LEFT JOIN subscriptions s ON s.account_id = a.id
+		LEFT JOIN plan_entitlements pe ON pe.plan_code = COALESCE(s.plan_code, a.plan) AND pe.key = 'max_users'
 		WHERE a.id = $1
-	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.StorageLimitBytes, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
+	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
 		&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 		&a.UserCount, &a.DeviceCount, &a.ChatCount,
 		&a.GoogleEmail, &a.GoogleContactGroupID, &a.GoogleConnectedAt, &a.GoogleSyncLimit)
@@ -523,17 +531,17 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 
 func (r *AccountRepository) Create(ctx context.Context, a *domain.Account) error {
 	return r.db.QueryRow(ctx, `
-		INSERT INTO accounts (name, slug, plan, max_devices, storage_limit_bytes, is_active)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO accounts (name, slug, plan, max_devices, max_users_override, storage_limit_bytes, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, created_at, updated_at
-	`, a.Name, a.Slug, a.Plan, a.MaxDevices, a.StorageLimitBytes, a.IsActive).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
+	`, a.Name, a.Slug, a.Plan, a.MaxDevices, a.MaxUsersOverride, a.StorageLimitBytes, a.IsActive).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
 }
 
 func (r *AccountRepository) Update(ctx context.Context, a *domain.Account) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, storage_limit_bytes = $6, mcp_enabled = $7, kommo_enabled = $8, updated_at = NOW()
+		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, max_users_override = $6, storage_limit_bytes = $7, mcp_enabled = $8, kommo_enabled = $9, updated_at = NOW()
 		WHERE id = $1
-	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices, a.StorageLimitBytes, a.MCPEnabled, a.KommoEnabled)
+	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices, a.MaxUsersOverride, a.StorageLimitBytes, a.MCPEnabled, a.KommoEnabled)
 	return err
 }
 

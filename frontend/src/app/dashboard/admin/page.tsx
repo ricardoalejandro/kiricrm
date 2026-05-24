@@ -14,6 +14,8 @@ interface Account {
   slug: string
   plan: string
   max_devices: number
+  max_users_override?: number | null
+  max_users_effective?: number
   storage_limit_bytes: number
   is_active: boolean
   mcp_enabled: boolean
@@ -259,7 +261,7 @@ export default function AdminPage() {
 
   // Account form
   const [accountForm, setAccountForm] = useState({
-    name: '', slug: '', plan: 'basic', max_devices: 5, storage_limit_gb: 0, mcp_enabled: false,
+    name: '', slug: '', plan: 'basic', max_devices: 5, max_users_override: '', storage_limit_gb: 0, mcp_enabled: false,
     subscription_status: 'active', trial_ends_at: '', current_period_end: ''
   })
 
@@ -358,7 +360,7 @@ export default function AdminPage() {
   // Account CRUD
   function openCreateAccount() {
     setEditingAccount(null)
-    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, storage_limit_gb: 0, mcp_enabled: false, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
+    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, max_users_override: '', storage_limit_gb: 0, mcp_enabled: false, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
     setShowAccountModal(true)
   }
 
@@ -369,6 +371,7 @@ export default function AdminPage() {
       slug: a.slug,
       plan: a.plan,
       max_devices: a.max_devices,
+      max_users_override: a.max_users_override === null || a.max_users_override === undefined ? '' : String(a.max_users_override),
       storage_limit_gb: bytesToGb(a.storage_limit_bytes),
       mcp_enabled: a.mcp_enabled,
       subscription_status: a.subscription_status || 'active',
@@ -389,6 +392,7 @@ export default function AdminPage() {
       slug: accountForm.slug,
       plan: accountForm.plan,
       max_devices: accountForm.max_devices,
+      max_users_override: accountForm.max_users_override === '' ? null : Math.max(0, parseInt(accountForm.max_users_override, 10) || 0),
       storage_limit_bytes: gbToBytes(accountForm.storage_limit_gb),
       mcp_enabled: accountForm.mcp_enabled,
     }
@@ -862,6 +866,24 @@ export default function AdminPage() {
 
   const planOptions = plans.length > 0 ? plans : fallbackPlans
 
+  function planMaxUsers(planCode: string) {
+    const plan = planOptions.find(p => p.code === planCode)
+    const raw = plan?.entitlements?.max_users
+    if (typeof raw === 'number') return raw
+    if (typeof raw === 'string') {
+      const parsed = parseInt(raw, 10)
+      return Number.isFinite(parsed) ? parsed : null
+    }
+    return null
+  }
+
+  function userLimitLabel(account: Account) {
+    const effective = account.max_users_effective ?? planMaxUsers(account.plan)
+    if (effective === 0) return `${account.user_count}/Sin límite`
+    if (effective && effective > 0) return `${account.user_count}/${effective}`
+    return String(account.user_count)
+  }
+
   function dateInputValue(value?: string | null) {
     if (!value) return ''
     const parsed = new Date(value)
@@ -1127,7 +1149,11 @@ export default function AdminPage() {
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-center text-gray-600">{a.user_count}</td>
+                  <td className="px-4 py-3 text-center text-gray-600">
+                    <span title={a.max_users_override === null || a.max_users_override === undefined ? 'Límite según plan' : 'Límite personalizado'}>
+                      {userLimitLabel(a)}
+                    </span>
+                  </td>
                   <td className="px-4 py-3 text-center text-gray-600">{a.device_count}/{a.max_devices}</td>
                   <td className="px-4 py-3 text-center text-gray-600">{a.chat_count}</td>
                   <td className="px-4 py-3 text-center text-gray-600">{formatBytes(a.storage_limit_bytes)}</td>
@@ -1667,6 +1693,18 @@ export default function AdminPage() {
                     min={1}
                   />
                 </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Límite de usuarios</label>
+                <input
+                  type="number"
+                  value={accountForm.max_users_override}
+                  onChange={e => setAccountForm(f => ({ ...f, max_users_override: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  min={0}
+                  placeholder={`Según plan (${planMaxUsers(accountForm.plan) ?? 'sin límite'})`}
+                />
+                <p className="mt-1 text-xs text-gray-400">Vacío usa el plan. 0 deja la cuenta sin límite.</p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Límite de almacenamiento (GB)</label>

@@ -48,6 +48,7 @@ func Migrate(db *pgxpool.Pool) error {
 			name VARCHAR(255) NOT NULL,
 			plan VARCHAR(50) DEFAULT 'free',
 			max_devices INT DEFAULT 5,
+			max_users_override INT NULL,
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			updated_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
@@ -381,6 +382,7 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'admin'`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS slug VARCHAR(255)`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_users_override INT NULL`,
 		`UPDATE users SET is_super_admin = TRUE, role = 'super_admin' WHERE is_admin = TRUE AND account_id = (SELECT id FROM accounts ORDER BY created_at LIMIT 1) AND is_super_admin = FALSE`,
 
 		// Multi-account user assignments (user can belong to many accounts)

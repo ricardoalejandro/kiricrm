@@ -80,6 +80,16 @@ func (s *SubscriptionService) GetOverview(ctx context.Context, accountID uuid.UU
 	if plan != nil {
 		overview.Entitlements = entitlementValues(plan.Entitlements)
 	}
+	account, err := s.repos.Account.GetByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if overview.Entitlements == nil {
+		overview.Entitlements = map[string]any{}
+	}
+	if account != nil && account.MaxUsersOverride != nil {
+		overview.Entitlements["max_users"] = *account.MaxUsersOverride
+	}
 	return overview, nil
 }
 

@@ -14,6 +14,8 @@ type Account struct {
 	Slug                   string     `json:"slug"`
 	Plan                   string     `json:"plan"`
 	MaxDevices             int        `json:"max_devices"`
+	MaxUsersOverride       *int       `json:"max_users_override,omitempty"`
+	MaxUsersEffective      int        `json:"max_users_effective,omitempty"`
 	StorageLimitBytes      int64      `json:"storage_limit_bytes"`
 	IsActive               bool       `json:"is_active"`
 	MCPEnabled             bool       `json:"mcp_enabled"`
