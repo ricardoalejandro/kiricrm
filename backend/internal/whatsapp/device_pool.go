@@ -1218,31 +1218,9 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 			if contact != nil {
 				newLead.ContactID = &contact.ID
 			}
-			if activePipeline, _ := p.repos.Pipeline.GetActivePipeline(ctx, instance.AccountID); activePipeline != nil {
-				newLead.PipelineID = &activePipeline.ID
-				if len(activePipeline.Stages) > 0 {
-					// 1. Check account-configured default incoming stage
-					var configured bool
-					if acct, _ := p.repos.Account.GetByID(ctx, instance.AccountID); acct != nil && acct.DefaultIncomingStageID != nil {
-						for _, st := range activePipeline.Stages {
-							if st.ID == *acct.DefaultIncomingStageID {
-								newLead.StageID = &st.ID
-								configured = true
-								break
-							}
-						}
-					}
-					if !configured {
-						// 2. Fallback: prefer "Leads Entrantes", then first stage
-						newLead.StageID = &activePipeline.Stages[0].ID
-						for _, st := range activePipeline.Stages {
-							if strings.EqualFold(st.Name, "Leads Entrantes") {
-								newLead.StageID = &st.ID
-								break
-							}
-						}
-					}
-				}
+			if pipelineID, stageID, err := p.repos.Pipeline.ResolveIncomingLeadDestination(ctx, instance.AccountID); err == nil {
+				newLead.PipelineID = pipelineID
+				newLead.StageID = stageID
 			}
 			if err := p.repos.Lead.Create(ctx, newLead); err == nil {
 				log.Printf("[Lead] Auto-created lead for %s (pipeline=%v, stage=%v, contact=%v)", contactJID, newLead.PipelineID, newLead.StageID, newLead.ContactID)

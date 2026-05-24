@@ -1104,7 +1104,7 @@ export default function LeadsPage() {
   const handleCreateLead = async () => {
     const token = localStorage.getItem('token')
     try {
-      const stageId = formData.stage_id || (activePipeline?.stages?.[0]?.id) || undefined
+      const stageId = formData.stage_id || undefined
       const res = await fetch('/api/leads', {
         method: 'POST',
         headers: {
@@ -3663,10 +3663,11 @@ export default function LeadsPage() {
                       {activePipeline.name}
                     </div>
                     <select
-                      value={formData.stage_id || activePipeline.stages[0]?.id || ''}
+                      value={formData.stage_id || ''}
                       onChange={(e) => setFormData({ ...formData, stage_id: e.target.value })}
                       className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
                     >
+                      <option value="">Automático (configuración de cuenta)</option>
                       {activePipeline.stages.map((st) => (
                         <option key={st.id} value={st.id}>{st.name}</option>
                       ))}

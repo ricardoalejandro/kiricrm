@@ -2011,19 +2011,14 @@ func SeedAdmin(db *pgxpool.Pool, cfg *config.Config) error {
 	return nil
 }
 
-// MigrateEventPipelines creates default event pipelines for accounts that have events
-// but no event pipeline yet, and maps existing participant statuses to stages.
+// MigrateEventPipelines ensures every account has a default event pipeline with
+// the canonical stages, then assigns existing events that still have no pipeline.
 func MigrateEventPipelines(db *pgxpool.Pool) error {
 	ctx := context.Background()
 
-	// Find accounts that have events but no event pipeline
-	rows, err := db.Query(ctx, `
-		SELECT DISTINCT e.account_id
-		FROM events e
-		WHERE NOT EXISTS (SELECT 1 FROM event_pipelines ep WHERE ep.account_id = e.account_id)
-	`)
+	rows, err := db.Query(ctx, `SELECT id FROM accounts`)
 	if err != nil {
-		return fmt.Errorf("failed to find accounts needing event pipeline: %w", err)
+		return fmt.Errorf("failed to list accounts for event pipelines: %w", err)
 	}
 	defer rows.Close()
 
@@ -2035,66 +2030,90 @@ func MigrateEventPipelines(db *pgxpool.Pool) error {
 		}
 		accountIDs = append(accountIDs, aid)
 	}
-
-	if len(accountIDs) == 0 {
-		return nil
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
-	// Default stages for new event pipelines
 	defaultStages := []struct {
-		name      string
-		color     string
-		oldStatus string
+		name  string
+		color string
 	}{
-		{"Registrados", "#3b82f6", "invited"},
-		{"Confirmados", "#10b981", "confirmed"},
-		{"Asistentes", "#059669", "attended"},
-		{"Pre inscrito", "#f59e0b", "contacted"},
-		{"Inscrito", "#6366f1", ""},
+		{"Registrados", "#3b82f6"},
+		{"Confirmados", "#10b981"},
+		{"Asistentes", "#059669"},
+		{"Interesados", "#8b5cf6"},
+		{"Contactados", "#eab308"},
+		{"Declinados", "#ef4444"},
+		{"Pre inscritos", "#f59e0b"},
+		{"Inscrito", "#6366f1"},
+	}
+	statusStageNames := map[string]string{
+		"invited":   "Registrados",
+		"confirmed": "Confirmados",
+		"attended":  "Asistentes",
+		"contacted": "Contactados",
+		"declined":  "Declinados",
 	}
 
 	for _, aid := range accountIDs {
-		// Create default event pipeline
 		var pipelineID string
-		err := db.QueryRow(ctx, `
-			INSERT INTO event_pipelines (account_id, name, description, is_default)
-			VALUES ($1, 'Pipeline por Defecto', 'Pipeline por defecto para eventos', TRUE)
-			RETURNING id
-		`, aid).Scan(&pipelineID)
+		err := db.QueryRow(ctx, `SELECT id FROM event_pipelines WHERE account_id = $1 AND is_default = TRUE LIMIT 1`, aid).Scan(&pipelineID)
 		if err != nil {
-			fmt.Printf("[MIGRATE] Warning: failed to create event pipeline for account %s: %v\n", aid, err)
-			continue
+			err = db.QueryRow(ctx, `
+				INSERT INTO event_pipelines (account_id, name, description, is_default)
+				VALUES ($1, 'Pipeline por Defecto', 'Pipeline por defecto para eventos', TRUE)
+				RETURNING id
+			`, aid).Scan(&pipelineID)
+			if err != nil {
+				log.Printf("[MIGRATE] Warning: failed to create event pipeline for account %s: %v", aid, err)
+				continue
+			}
 		}
 
-		// Create stages and build status→stage_id map
-		statusToStage := make(map[string]string)
+		_, _ = db.Exec(ctx, `UPDATE event_pipeline_stages SET name = 'Pre inscritos' WHERE pipeline_id = $1 AND name = 'Pre inscrito'`, pipelineID)
+
+		stageIDs := make(map[string]string)
+		var maxPos int
+		_ = db.QueryRow(ctx, `SELECT COALESCE(MAX(position), -1) FROM event_pipeline_stages WHERE pipeline_id = $1`, pipelineID).Scan(&maxPos)
 		for i, stage := range defaultStages {
 			var stageID string
 			err := db.QueryRow(ctx, `
-				INSERT INTO event_pipeline_stages (pipeline_id, name, color, position)
-				VALUES ($1, $2, $3, $4)
-				RETURNING id
-			`, pipelineID, stage.name, stage.color, i).Scan(&stageID)
+				SELECT id FROM event_pipeline_stages
+				WHERE pipeline_id = $1 AND LOWER(name) = LOWER($2)
+				LIMIT 1
+			`, pipelineID, stage.name).Scan(&stageID)
 			if err != nil {
-				fmt.Printf("[MIGRATE] Warning: failed to create stage %s: %v\n", stage.name, err)
-				continue
+				position := i
+				if maxPos >= i {
+					maxPos++
+					position = maxPos
+				}
+				err = db.QueryRow(ctx, `
+					INSERT INTO event_pipeline_stages (pipeline_id, name, color, position)
+					VALUES ($1, $2, $3, $4)
+					RETURNING id
+				`, pipelineID, stage.name, stage.color, position).Scan(&stageID)
+				if err != nil {
+					log.Printf("[MIGRATE] Warning: failed to create event stage %s for account %s: %v", stage.name, aid, err)
+					continue
+				}
 			}
-			statusToStage[stage.oldStatus] = stageID
+			stageIDs[stage.name] = stageID
 		}
 
-		// Set pipeline_id on all events for this account
 		_, _ = db.Exec(ctx, `UPDATE events SET pipeline_id = $1 WHERE account_id = $2 AND pipeline_id IS NULL`, pipelineID, aid)
 
-		// Map existing participant statuses to stages
-		for status, stageID := range statusToStage {
+		for status, stageName := range statusStageNames {
+			stageID := stageIDs[stageName]
+			if stageID == "" {
+				continue
+			}
 			_, _ = db.Exec(ctx, `
 				UPDATE event_participants SET stage_id = $1
 				WHERE event_id IN (SELECT id FROM events WHERE account_id = $2)
 				AND status = $3 AND stage_id IS NULL
 			`, stageID, aid, status)
 		}
-
-		fmt.Printf("[MIGRATE] Created default event pipeline for account %s with %d stages\n", aid, len(statusToStage))
 	}
 
 	// Migrate messages unique constraint from (account_id, device_id, message_id) to (chat_id, message_id)

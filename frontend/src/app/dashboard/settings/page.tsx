@@ -2122,7 +2122,7 @@ export default function SettingsPage() {
                   <h3 className="text-sm font-medium text-slate-900">Etapa de Leads Entrantes</h3>
                 </div>
                 <p className="text-xs text-slate-500 mb-3">
-                  Los nuevos leads que lleguen por WhatsApp se asignarán automáticamente a esta etapa.
+                  Los nuevos leads se asignarán por defecto a esta etapa cuando no se elija otra manualmente.
                 </p>
                 <div className="flex items-center gap-3">
                   <select

@@ -54,10 +54,10 @@ func (s *Server) handleCreateDynamic(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
 	var req struct {
-		Name        string              `json:"name"`
-		Type        string              `json:"type"`
-		Slug        string              `json:"slug"`
-		Description string              `json:"description"`
+		Name        string               `json:"name"`
+		Type        string               `json:"type"`
+		Slug        string               `json:"slug"`
+		Description string               `json:"description"`
 		Config      domain.DynamicConfig `json:"config"`
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -109,11 +109,11 @@ func (s *Server) handleUpdateDynamic(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		Name        string              `json:"name"`
-		Slug        string              `json:"slug"`
-		Description string              `json:"description"`
+		Name        string               `json:"name"`
+		Slug        string               `json:"slug"`
+		Description string               `json:"description"`
 		Config      domain.DynamicConfig `json:"config"`
-		IsActive    bool                `json:"is_active"`
+		IsActive    bool                 `json:"is_active"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -1278,7 +1278,7 @@ func (s *Server) ensureLeadForRegistration(ctx context.Context, accountID uuid.U
 		return &contact.ID, &existingLead.ID, nil
 	}
 
-	// Create lead with default pipeline
+	// Create lead with the account incoming pipeline/stage.
 	lead := &domain.Lead{
 		AccountID: accountID,
 		JID:       jid,
@@ -1288,11 +1288,9 @@ func (s *Server) ensureLeadForRegistration(ctx context.Context, accountID uuid.U
 		Status:    strPtr(domain.LeadStatusNew),
 		ContactID: &contact.ID,
 	}
-	if dp, _ := s.services.Pipeline.GetDefaultPipeline(ctx, accountID); dp != nil {
-		lead.PipelineID = &dp.ID
-		if len(dp.Stages) > 0 {
-			lead.StageID = &dp.Stages[0].ID
-		}
+	if pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID); err == nil {
+		lead.PipelineID = pipelineID
+		lead.StageID = stageID
 	}
 	if err := s.services.Lead.Create(ctx, lead); err != nil {
 		return &contact.ID, nil, err

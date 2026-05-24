@@ -4884,48 +4884,25 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		Status:    strPtr(domain.LeadStatusNew),
 	}
 
-	// Auto-assign default pipeline and stage
+	// Auto-assign pipeline and stage. An explicit stage is an override, but it
+	// must belong to this account; otherwise use the account incoming default.
 	if req.StageID != nil {
-		lead.StageID = req.StageID
-		// Get the pipeline from the stage
-		pipelines, _ := s.services.Pipeline.GetByAccountID(c.Context(), accountID)
-		for _, p := range pipelines {
-			for _, st := range p.Stages {
-				if st.ID == *req.StageID {
-					lead.PipelineID = &p.ID
-					break
-				}
-			}
+		pipelineID, stageID, err := s.repos.Pipeline.ResolveStageDestination(c.Context(), accountID, *req.StageID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
+		if pipelineID == nil || stageID == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid stage_id"})
+		}
+		lead.PipelineID = pipelineID
+		lead.StageID = stageID
 	} else {
-		// Assign to default pipeline first stage
-		defaultPipeline, _ := s.services.Pipeline.GetDefaultPipeline(c.Context(), accountID)
-		if defaultPipeline != nil {
-			lead.PipelineID = &defaultPipeline.ID
-			if len(defaultPipeline.Stages) > 0 {
-				// 1. Check account-configured default incoming stage
-				var configured bool
-				if acct, _ := s.services.Account.GetByID(c.Context(), accountID); acct != nil && acct.DefaultIncomingStageID != nil {
-					for _, st := range defaultPipeline.Stages {
-						if st.ID == *acct.DefaultIncomingStageID {
-							lead.StageID = &st.ID
-							configured = true
-							break
-						}
-					}
-				}
-				if !configured {
-					// 2. Fallback: prefer "Leads Entrantes", then first stage
-					lead.StageID = &defaultPipeline.Stages[0].ID
-					for _, st := range defaultPipeline.Stages {
-						if strings.EqualFold(st.Name, "Leads Entrantes") {
-							lead.StageID = &st.ID
-							break
-						}
-					}
-				}
-			}
+		pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(c.Context(), accountID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
+		lead.PipelineID = pipelineID
+		lead.StageID = stageID
 	}
 
 	// Auto-link or auto-create contact by JID
@@ -6369,29 +6346,12 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 					}
 				}
 			}
-			// Fallback: assign to default pipeline first stage
-			if lead.PipelineID == nil && defaultPipeline != nil && defaultPipeline.Stages != nil && len(defaultPipeline.Stages) > 0 {
-				lead.PipelineID = &defaultPipeline.ID
-				// 1. Check account-configured default incoming stage
-				var configured bool
-				if acct, _ := s.services.Account.GetByID(c.Context(), accountID); acct != nil && acct.DefaultIncomingStageID != nil {
-					for _, st := range defaultPipeline.Stages {
-						if st.ID == *acct.DefaultIncomingStageID {
-							lead.StageID = &st.ID
-							configured = true
-							break
-						}
-					}
-				}
-				if !configured {
-					// 2. Fallback: prefer "Leads Entrantes", then first stage
-					lead.StageID = &defaultPipeline.Stages[0].ID
-					for _, st := range defaultPipeline.Stages {
-						if strings.EqualFold(st.Name, "Leads Entrantes") {
-							lead.StageID = &st.ID
-							break
-						}
-					}
+			// Fallback: use the account incoming default when CSV did not provide a matching stage.
+			if lead.PipelineID == nil {
+				pipelineID, resolvedStageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(c.Context(), accountID)
+				if err == nil {
+					lead.PipelineID = pipelineID
+					lead.StageID = resolvedStageID
 				}
 			}
 
@@ -8534,7 +8494,10 @@ func (s *Server) handleCreateEvent(c *fiber.Ctx) error {
 	}
 	// If no pipeline specified, assign default
 	if event.PipelineID == nil {
-		defPipeline, _ := s.services.Event.GetDefaultPipeline(c.Context(), accountID)
+		defPipeline, err := s.repos.EventPipeline.EnsureDefaultByAccountID(c.Context(), accountID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
 		if defPipeline != nil {
 			event.PipelineID = &defPipeline.ID
 		}
@@ -11023,7 +10986,10 @@ func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
 		}
 	}
 	if event.PipelineID == nil {
-		defPipeline, _ := s.services.Event.GetDefaultPipeline(c.Context(), accountID)
+		defPipeline, err := s.repos.EventPipeline.EnsureDefaultByAccountID(c.Context(), accountID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to ensure event pipeline: " + err.Error()})
+		}
 		if defPipeline != nil {
 			event.PipelineID = &defPipeline.ID
 		}

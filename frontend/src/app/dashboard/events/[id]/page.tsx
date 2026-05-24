@@ -1043,8 +1043,7 @@ export default function EventDetailPage() {
     if (!leadForm.name) return
     setCreatingLead(true)
     try {
-      const activePipeline = leadPipelines[0]
-      const stageId = leadForm.stage_id || activePipeline?.stages?.[0]?.id || undefined
+      const stageId = leadForm.stage_id || undefined
       // Step 1: Create the lead (backend auto-creates/links contact)
       const leadRes = await fetch('/api/leads', {
         method: 'POST',
@@ -1179,8 +1178,7 @@ export default function EventDetailPage() {
         if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingFromConfirm(false); return }
       } else {
         // ── Create new lead and add as participant ──
-        const activePipeline = leadPipelines[0]
-        const stageId = leadForm.stage_id || activePipeline?.stages?.[0]?.id || undefined
+        const stageId = leadForm.stage_id || undefined
         const leadRes = await fetch('/api/leads', {
           method: 'POST',
           headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
@@ -3582,10 +3580,11 @@ export default function EventDetailPage() {
                         {leadPipelines[0].name}
                       </div>
                       <select
-                        value={leadForm.stage_id || leadPipelines[0].stages[0]?.id || ''}
+                        value={leadForm.stage_id || ''}
                         onChange={(e) => setLeadForm(f => ({ ...f, stage_id: e.target.value }))}
                         className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
                       >
+                        <option value="">Automático (configuración de cuenta)</option>
                         {leadPipelines[0].stages.map((st: { id: string; name: string }) => (
                           <option key={st.id} value={st.id}>{st.name}</option>
                         ))}
@@ -3789,10 +3788,11 @@ export default function EventDetailPage() {
                       {leadPipelines[0].name}
                     </div>
                     <select
-                      value={leadForm.stage_id || leadPipelines[0].stages[0]?.id || ''}
+                      value={leadForm.stage_id || ''}
                       onChange={(e) => setLeadForm(f => ({ ...f, stage_id: e.target.value }))}
                       className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
                     >
+                      <option value="">Automático (configuración de cuenta)</option>
                       {leadPipelines[0].stages.map((st: { id: string; name: string }) => (
                         <option key={st.id} value={st.id}>{st.name}</option>
                       ))}

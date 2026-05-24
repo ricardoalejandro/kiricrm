@@ -2369,6 +2369,88 @@ func (r *PipelineRepository) GetActivePipeline(ctx context.Context, accountID uu
 	return r.GetDefaultPipeline(ctx, accountID)
 }
 
+func (r *PipelineRepository) ResolveStageDestination(ctx context.Context, accountID, stageID uuid.UUID) (*uuid.UUID, *uuid.UUID, error) {
+	var pipelineID uuid.UUID
+	err := r.db.QueryRow(ctx, `
+		SELECT ps.pipeline_id
+		FROM pipeline_stages ps
+		JOIN pipelines p ON p.id = ps.pipeline_id
+		WHERE ps.id = $1 AND p.account_id = $2
+	`, stageID, accountID).Scan(&pipelineID)
+	if err == pgx.ErrNoRows {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	pid := pipelineID
+	sid := stageID
+	return &pid, &sid, nil
+}
+
+func (r *PipelineRepository) ResolveIncomingLeadDestination(ctx context.Context, accountID uuid.UUID) (*uuid.UUID, *uuid.UUID, error) {
+	var configuredPipelineID, configuredStageID uuid.UUID
+	err := r.db.QueryRow(ctx, `
+		SELECT ps.pipeline_id, ps.id
+		FROM accounts a
+		JOIN pipeline_stages ps ON ps.id = a.default_incoming_stage_id
+		JOIN pipelines p ON p.id = ps.pipeline_id
+		WHERE a.id = $1 AND p.account_id = $1
+	`, accountID).Scan(&configuredPipelineID, &configuredStageID)
+	if err == nil {
+		pid := configuredPipelineID
+		sid := configuredStageID
+		return &pid, &sid, nil
+	}
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, nil, err
+	}
+
+	pickDestination := func(pipeline *domain.Pipeline) (*uuid.UUID, *uuid.UUID) {
+		if pipeline == nil {
+			return nil, nil
+		}
+		pid := pipeline.ID
+		var stageID *uuid.UUID
+		for _, st := range pipeline.Stages {
+			if strings.EqualFold(st.Name, "Leads Entrantes") {
+				sid := st.ID
+				stageID = &sid
+				break
+			}
+		}
+		if stageID == nil && len(pipeline.Stages) > 0 {
+			sid := pipeline.Stages[0].ID
+			stageID = &sid
+		}
+		return &pid, stageID
+	}
+
+	pipeline, err := r.GetActivePipeline(ctx, accountID)
+	if err != nil {
+		return nil, nil, err
+	}
+	pipelineID, stageID := pickDestination(pipeline)
+	if stageID != nil {
+		return pipelineID, stageID, nil
+	}
+
+	pipelines, err := r.GetByAccountID(ctx, accountID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, candidate := range pipelines {
+		if pipeline != nil && candidate.ID == pipeline.ID {
+			continue
+		}
+		candidatePipelineID, candidateStageID := pickDestination(candidate)
+		if candidateStageID != nil {
+			return candidatePipelineID, candidateStageID, nil
+		}
+	}
+	return pipelineID, stageID, nil
+}
+
 // TagRepository handles tag data access
 type TagRepository struct {
 	db *pgxpool.Pool
@@ -3775,6 +3857,20 @@ type EventPipelineRepository struct {
 	db *pgxpool.Pool
 }
 
+var defaultEventPipelineStages = []struct {
+	name  string
+	color string
+}{
+	{"Registrados", "#3b82f6"},
+	{"Confirmados", "#10b981"},
+	{"Asistentes", "#059669"},
+	{"Interesados", "#8b5cf6"},
+	{"Contactados", "#eab308"},
+	{"Declinados", "#ef4444"},
+	{"Pre inscritos", "#f59e0b"},
+	{"Inscrito", "#6366f1"},
+}
+
 func (r *EventPipelineRepository) Create(ctx context.Context, p *domain.EventPipeline) error {
 	p.ID = uuid.New()
 	now := time.Now()
@@ -3785,6 +3881,60 @@ func (r *EventPipelineRepository) Create(ctx context.Context, p *domain.EventPip
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 	`, p.ID, p.AccountID, p.Name, p.Description, p.IsDefault, p.CreatedAt, p.UpdatedAt)
 	return err
+}
+
+func (r *EventPipelineRepository) EnsureDefaultByAccountID(ctx context.Context, accountID uuid.UUID) (*domain.EventPipeline, error) {
+	pipeline, err := r.GetDefaultByAccountID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if pipeline == nil {
+		desc := "Pipeline por defecto para eventos"
+		pipeline = &domain.EventPipeline{
+			AccountID:   accountID,
+			Name:        "Pipeline por Defecto",
+			Description: &desc,
+			IsDefault:   true,
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+		if err := r.Create(ctx, pipeline); err != nil {
+			return nil, err
+		}
+	}
+
+	_, _ = r.db.Exec(ctx, `
+		UPDATE event_pipeline_stages
+		SET name = 'Pre inscritos'
+		WHERE pipeline_id = $1 AND name = 'Pre inscrito'
+	`, pipeline.ID)
+
+	var maxPos int
+	_ = r.db.QueryRow(ctx, `SELECT COALESCE(MAX(position), -1) FROM event_pipeline_stages WHERE pipeline_id = $1`, pipeline.ID).Scan(&maxPos)
+	for _, stage := range defaultEventPipelineStages {
+		var exists bool
+		err := r.db.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM event_pipeline_stages
+				WHERE pipeline_id = $1 AND LOWER(name) = LOWER($2)
+			)
+		`, pipeline.ID, stage.name).Scan(&exists)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			continue
+		}
+		maxPos++
+		_, err = r.db.Exec(ctx, `
+			INSERT INTO event_pipeline_stages (pipeline_id, name, color, position)
+			VALUES ($1, $2, $3, $4)
+		`, pipeline.ID, stage.name, stage.color, maxPos)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return r.GetByID(ctx, pipeline.ID)
 }
 
 func (r *EventPipelineRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.EventPipeline, error) {

@@ -280,6 +280,10 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 			Status: strPtr(domain.LeadStatusNew),
 			Source: strPtr("whatsapp_api"),
 		}
+		if pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, device.AccountID); err == nil {
+			newLead.PipelineID = pipelineID
+			newLead.StageID = stageID
+		}
 		_ = s.repos.Lead.Create(ctx, newLead)
 	}
 
