@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { ArrowRight, Eye, EyeOff, Lock, MessageSquare, User } from 'lucide-react'
+import { markAuthActivity } from '@/lib/api'
 
 export default function LoginScreen() {
   const router = useRouter()
@@ -29,6 +30,7 @@ export default function LoginScreen() {
         return
       }
       localStorage.setItem('token', data.token)
+      markAuthActivity(true)
       router.push('/dashboard')
       router.refresh()
     } catch {

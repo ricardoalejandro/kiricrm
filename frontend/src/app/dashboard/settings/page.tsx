@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe, Hash, Calendar, ToggleLeft, Mail, Phone, Link, DollarSign, Type, Tag, List, AlertCircle, HardDrive } from 'lucide-react'
-import { clearAuthState, subscribeWebSocket } from '@/lib/api'
+import { logoutFromBrowser, subscribeWebSocket } from '@/lib/api'
 import WhatsAppAPISettingsPanel from '@/components/WhatsAppAPISettingsPanel'
 import { CustomFieldDefinition, CustomFieldType, CustomFieldOption, CustomFieldConfig } from '@/types/custom-field'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
@@ -1932,8 +1932,7 @@ export default function SettingsPage() {
   }
 
   const handleLogout = () => {
-    clearAuthState()
-    window.location.href = '/login'
+    void logoutFromBrowser('manual')
   }
 
   if (loading) {

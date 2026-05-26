@@ -251,6 +251,7 @@ func (s *Server) setupRoutes() {
 	auth.Post("/login", s.handleLogin)
 	auth.Post("/register", s.handleRegister)
 	auth.Post("/refresh", s.handleRefreshToken)
+	auth.Post("/logout", s.handleLogout)
 
 	// Kommo webhook (public — called by Kommo, secret in URL for validation)
 	api.Post("/kommo/webhook/:secret", s.handleKommoWebhook)
@@ -266,6 +267,7 @@ func (s *Server) setupRoutes() {
 	protected.Get("/me", s.handleGetMe)
 	protected.Get("/me/accounts", s.handleGetMyAccounts)
 	protected.Post("/auth/logout", s.handleLogout)
+	protected.Post("/auth/activity", s.handleAuthActivity)
 	protected.Post("/auth/switch-account", s.handleSwitchAccount)
 
 	// Settings routes
@@ -1015,11 +1017,35 @@ func (s *Server) handleLogout(c *fiber.Ctx) error {
 	// Revoke JWT + delete refresh token
 	claims, _ := c.Locals("claims").(*service.JWTClaims)
 	refreshToken := c.Cookies("refresh-token")
+
+	if claims == nil {
+		authHeader := c.Get("Authorization")
+		if authHeader == "" {
+			authHeader = c.Cookies("auth-token")
+		}
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token != "" {
+			if parsedClaims, err := s.services.Auth.ValidateToken(token, s.cfg.JWTSecret); err == nil {
+				claims = parsedClaims
+			}
+		}
+	}
+
 	if claims != nil {
 		s.services.Auth.Logout(c.Context(), claims, refreshToken)
+	} else {
+		s.services.Auth.LogoutByRefreshToken(c.Context(), refreshToken)
 	}
 
 	s.clearAuthCookies(c)
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAuthActivity(c *fiber.Ctx) error {
+	claims, _ := c.Locals("claims").(*service.JWTClaims)
+	if claims == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "error": "Unauthorized"})
+	}
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -12678,6 +12704,10 @@ func (s *Server) handleAdminDeleteUser(c *fiber.Ctx) error {
 
 func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(uuid.UUID)
+	claims, _ := c.Locals("claims").(*service.JWTClaims)
+	if claims == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "error": "Unauthorized"})
+	}
 
 	var req struct {
 		AccountID string `json:"account_id"`
@@ -12691,7 +12721,7 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
 	}
 
-	token, refreshToken, user, err := s.services.Auth.SwitchAccount(c.Context(), userID, targetAccountID, s.cfg.JWTSecret)
+	token, refreshToken, user, err := s.services.Auth.SwitchAccount(c.Context(), userID, targetAccountID, claims.SessionID, s.cfg.JWTSecret)
 	if err != nil {
 		return c.Status(403).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}

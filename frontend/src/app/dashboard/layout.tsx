@@ -6,7 +6,7 @@ import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
 import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
-import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState } from '@/lib/api'
+import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthActivity } from '@/lib/api'
 import {
   MessageSquare,
   Settings,
@@ -135,6 +135,11 @@ export default function DashboardLayout({
   useEffect(() => {
     const checkAuth = async () => {
       try {
+        if (isAuthIdleExpired()) {
+          await logoutFromBrowser('idle')
+          return
+        }
+
         const token = localStorage.getItem('token')
         if (!token) {
           // Try refresh — maybe the JWT expired but refresh token cookie is valid
@@ -165,6 +170,7 @@ export default function DashboardLayout({
                 setUser(retryData.user)
                 if (retryData.accounts) setAccounts(retryData.accounts)
                 localStorage.setItem('kommo_enabled', String(retryData.user.kommo_enabled || false))
+                markAuthActivity(true)
                 initIdleTimeout()
                 return
               }
@@ -180,6 +186,7 @@ export default function DashboardLayout({
           setUser(data.user)
           if (data.accounts) setAccounts(data.accounts)
           localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
+          markAuthActivity(true)
           initIdleTimeout() // Start idle timeout detector
         } else {
           clearAuthState()
@@ -268,15 +275,8 @@ export default function DashboardLayout({
   }
 
   const handleLogout = async () => {
-    const token = localStorage.getItem('token')
     clearIdleTimeout()
-    clearAuthState()
-    await fetch('/api/auth/logout', {
-      method: 'POST',
-      credentials: 'include',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
-    router.push('/login')
+    await logoutFromBrowser('manual')
   }
 
   const handleSwitchAccount = async (accountId: string) => {
@@ -292,6 +292,7 @@ export default function DashboardLayout({
       const data = await res.json()
       if (data.success) {
         localStorage.setItem('token', data.token)
+        markAuthActivity(true)
         localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
         setUser(data.user)
         setShowAccountSwitcher(false)
