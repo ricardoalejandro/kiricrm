@@ -104,6 +104,9 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+      # Cloudflare Turnstile (login protection)
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
       # SOCKS5 proxy for WhatsApp CDN media uploads (Cloudflare WARP)
       MEDIA_SOCKS5_PROXY: socks5://host-gateway:40001
     extra_hosts:

@@ -6,7 +6,7 @@ import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
 import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
-import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthActivity } from '@/lib/api'
+import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSession } from '@/lib/api'
 import {
   MessageSquare,
   Settings,
@@ -151,18 +151,16 @@ export default function DashboardLayout({
           }
         }
 
-        const currentToken = localStorage.getItem('token')
         const res = await fetch('/api/me', {
-          headers: { Authorization: `Bearer ${currentToken}` },
+          credentials: 'include',
         })
 
         if (!res.ok) {
           // Try refreshing the token
           const refreshed = await tryRefreshToken()
           if (refreshed) {
-            const newToken = localStorage.getItem('token')
             const retryRes = await fetch('/api/me', {
-              headers: { Authorization: `Bearer ${newToken}` },
+              credentials: 'include',
             })
             if (retryRes.ok) {
               const retryData = await retryRes.json()
@@ -170,7 +168,7 @@ export default function DashboardLayout({
                 setUser(retryData.user)
                 if (retryData.accounts) setAccounts(retryData.accounts)
                 localStorage.setItem('kommo_enabled', String(retryData.user.kommo_enabled || false))
-                markAuthActivity(true)
+                markAuthSession()
                 initIdleTimeout()
                 return
               }
@@ -186,7 +184,7 @@ export default function DashboardLayout({
           setUser(data.user)
           if (data.accounts) setAccounts(data.accounts)
           localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
-          markAuthActivity(true)
+          markAuthSession()
           initIdleTimeout() // Start idle timeout detector
         } else {
           clearAuthState()
@@ -280,19 +278,16 @@ export default function DashboardLayout({
   }
 
   const handleSwitchAccount = async (accountId: string) => {
-    const token = localStorage.getItem('token')
-    if (!token) return
     try {
       const res = await fetch('/api/auth/switch-account', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ account_id: accountId }),
         credentials: 'include',
       })
       const data = await res.json()
       if (data.success) {
-        localStorage.setItem('token', data.token)
-        markAuthActivity(true)
+        markAuthSession()
         localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
         setUser(data.user)
         setShowAccountSwitcher(false)

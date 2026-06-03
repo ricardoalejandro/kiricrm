@@ -2421,7 +2421,7 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	}
 
 	// Send message
-	resp, err := instance.Client.SendMessage(ctx, jid, msg)
+	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendMessage")
 	if err != nil {
 		instance.mu.Lock()
 		instance.Metrics.SendErrorCount++
@@ -2436,11 +2436,11 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 
 	// Get or create chat using normalized JID (without device suffix)
 	// Resolve @lid to @s.whatsapp.net for consistent chat identity
-	normalizedJID := jid.ToNonAD().String()
-	if jid.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+	normalizedJID := sendJID.ToNonAD().String()
+	if sendJID.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, sendJID.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 			normalizedJID = pnJID.User + "@s.whatsapp.net"
-			log.Printf("[SendMessage] Resolved LID %s -> %s", jid.ToNonAD().String(), normalizedJID)
+			log.Printf("[SendMessage] Resolved LID %s -> %s", sendJID.ToNonAD().String(), normalizedJID)
 		}
 	}
 	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
@@ -2478,6 +2478,32 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	})
 
 	return message, nil
+}
+
+func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *DeviceInstance, jid types.JID, msg *waE2E.Message, label string) (whatsmeow.SendResponse, types.JID, error) {
+	resp, err := instance.Client.SendMessage(ctx, jid, msg)
+	if err == nil {
+		return resp, jid, nil
+	}
+
+	if jid.Server != types.DefaultUserServer || !strings.Contains(err.Error(), "server returned error 463") {
+		return resp, jid, err
+	}
+
+	lidJID, lidErr := p.store.LIDMap.GetLIDForPN(ctx, jid.ToNonAD())
+	if lidErr != nil || lidJID.IsEmpty() {
+		if lidErr != nil {
+			log.Printf("[%s] WhatsApp returned 463 for %s and LID lookup failed: %v", label, jid.ToNonAD().String(), lidErr)
+		}
+		return resp, jid, err
+	}
+
+	log.Printf("[%s] WhatsApp returned 463 for %s, retrying via LID %s", label, jid.ToNonAD().String(), lidJID.ToNonAD().String())
+	lidResp, retryErr := instance.Client.SendMessage(ctx, lidJID, msg)
+	if retryErr != nil {
+		return resp, jid, fmt.Errorf("%w; LID retry to %s also failed: %v", err, lidJID.ToNonAD().String(), retryErr)
+	}
+	return lidResp, lidJID, nil
 }
 
 // SendReplyMessage sends a text message as a reply to another message
@@ -2526,15 +2552,15 @@ func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, t
 	}
 
 	// Send message
-	resp, err := instance.Client.SendMessage(ctx, jid, msg)
+	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendReplyMessage")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send reply: %w", err)
 	}
 
 	// Get or create chat
-	normalizedJID := jid.ToNonAD().String()
-	if jid.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+	normalizedJID := sendJID.ToNonAD().String()
+	if sendJID.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, sendJID.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 			normalizedJID = pnJID.User + "@s.whatsapp.net"
 		}
 	}
@@ -2719,7 +2745,7 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 		},
 	}
 
-	resp, err := instance.Client.SendMessage(ctx, jid, msg)
+	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPoll")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send poll: %w", err)
 	}
@@ -2731,9 +2757,9 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 	}
 
 	// Get or create chat
-	normalizedJID := jid.ToNonAD().String()
-	if jid.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+	normalizedJID := sendJID.ToNonAD().String()
+	if sendJID.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, sendJID.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 			normalizedJID = pnJID.User + "@s.whatsapp.net"
 		}
 	}
@@ -3047,17 +3073,17 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 	}
 
 	// Send message
-	sendResp, err := instance.Client.SendMessage(ctx, jid, msg)
+	sendResp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPreUploadedMedia")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
 	// Get or create chat using normalized JID
-	normalizedJID := jid.ToNonAD().String()
-	if jid.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+	normalizedJID := sendJID.ToNonAD().String()
+	if sendJID.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, sendJID.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 			normalizedJID = pnJID.User + "@s.whatsapp.net"
-			log.Printf("[SendPreUploadedMedia] Resolved LID %s -> %s", jid.ToNonAD().String(), normalizedJID)
+			log.Printf("[SendPreUploadedMedia] Resolved LID %s -> %s", sendJID.ToNonAD().String(), normalizedJID)
 		}
 	}
 	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
@@ -3162,15 +3188,15 @@ func (p *DevicePool) SendContactMessage(ctx context.Context, deviceID uuid.UUID,
 		},
 	}
 
-	sendResp, err := instance.Client.SendMessage(ctx, jid, msg)
+	sendResp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendContactMessage")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send contact message: %w", err)
 	}
 
 	// Get or create chat
-	normalizedJID := jid.ToNonAD().String()
-	if jid.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+	normalizedJID := sendJID.ToNonAD().String()
+	if sendJID.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, sendJID.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 			normalizedJID = pnJID.User + "@s.whatsapp.net"
 		}
 	}
@@ -3282,12 +3308,7 @@ func (p *DevicePool) ResetDevice(ctx context.Context, deviceID uuid.UUID) error 
 	p.mu.Unlock()
 
 	if exists && instance.Client != nil {
-		// Logout from WhatsApp (unlinks companion device)
-		if instance.Client.Store.ID != nil {
-			_ = instance.Client.Logout(ctx)
-			log.Printf("[DevicePool] Device %s logged out from WhatsApp", deviceID)
-		}
-		instance.Client.Disconnect()
+		p.logoutAndDeleteClientStore(ctx, instance.Client, fmt.Sprintf("device %s reset", deviceID))
 
 		// Remove from pool
 		p.mu.Lock()
@@ -3305,21 +3326,75 @@ func (p *DevicePool) ResetDevice(ctx context.Context, deviceID uuid.UUID) error 
 
 // DeleteDevice removes a device completely
 func (p *DevicePool) DeleteDevice(ctx context.Context, deviceID uuid.UUID) error {
-	// First disconnect
-	_ = p.DisconnectDevice(ctx, deviceID)
+	device, _ := p.repos.Device.GetByID(ctx, deviceID)
+	var savedJID string
+	if device != nil && device.JID != nil {
+		savedJID = strings.TrimSpace(*device.JID)
+	}
 
 	p.mu.Lock()
 	instance, exists := p.devices[deviceID]
 	if exists {
 		if instance.Client != nil {
-			instance.Client.Logout(ctx)
+			p.logoutAndDeleteClientStore(ctx, instance.Client, fmt.Sprintf("device %s delete", deviceID))
 		}
 		delete(p.devices, deviceID)
 	}
 	p.mu.Unlock()
 
+	if !exists && savedJID != "" {
+		p.deleteStoredWhatsAppDevice(ctx, savedJID, fmt.Sprintf("device %s delete", deviceID))
+	}
+
 	// Delete from database
 	return p.repos.Device.Delete(ctx, deviceID)
+}
+
+func (p *DevicePool) logoutAndDeleteClientStore(ctx context.Context, client *whatsmeow.Client, label string) {
+	if client == nil {
+		return
+	}
+	if client.Store == nil || client.Store.ID == nil {
+		client.Disconnect()
+		return
+	}
+
+	waStore := client.Store
+	jid := waStore.ID.String()
+	if err := client.Logout(ctx); err != nil {
+		log.Printf("[DevicePool] WhatsApp logout failed for %s (%s), forcing local store cleanup: %v", label, jid, err)
+		client.Disconnect()
+		if waStore.ID != nil {
+			if deleteErr := waStore.Delete(ctx); deleteErr != nil {
+				log.Printf("[DevicePool] Failed to force-delete WhatsApp store for %s (%s): %v", label, jid, deleteErr)
+			} else {
+				log.Printf("[DevicePool] Force-deleted WhatsApp store for %s (%s)", label, jid)
+			}
+		}
+		return
+	}
+	log.Printf("[DevicePool] Logged out and deleted WhatsApp store for %s (%s)", label, jid)
+}
+
+func (p *DevicePool) deleteStoredWhatsAppDevice(ctx context.Context, jid string, label string) {
+	parsed, err := types.ParseJID(jid)
+	if err != nil {
+		log.Printf("[DevicePool] Cannot clean WhatsApp store for %s: invalid JID %q: %v", label, jid, err)
+		return
+	}
+	waDevice, err := p.store.GetDevice(ctx, parsed)
+	if err != nil {
+		log.Printf("[DevicePool] Failed to load WhatsApp store for cleanup %s (%s): %v", label, jid, err)
+		return
+	}
+	if waDevice == nil {
+		return
+	}
+	if err := waDevice.Delete(ctx); err != nil {
+		log.Printf("[DevicePool] Failed to delete WhatsApp store for %s (%s): %v", label, jid, err)
+		return
+	}
+	log.Printf("[DevicePool] Deleted stored WhatsApp device for %s (%s)", label, jid)
 }
 
 // Shutdown closes all connections gracefully

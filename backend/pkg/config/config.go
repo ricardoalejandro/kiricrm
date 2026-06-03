@@ -26,11 +26,11 @@ type Config struct {
 	MinioUseSSL    bool
 	MinioPublicURL string
 	// Kommo CRM
-	KommoSubdomain    string
-	KommoClientID     string
-	KommoClientSecret string
-	KommoAccessToken  string
-	KommoRedirectURI  string
+	KommoSubdomain     string
+	KommoClientID      string
+	KommoClientSecret  string
+	KommoAccessToken   string
+	KommoRedirectURI   string
 	KommoWebhookSecret string
 	KommoProxyURL      string
 	// Kommo Outbox (batched push worker)
@@ -49,6 +49,9 @@ type Config struct {
 	GoogleClientID     string
 	GoogleClientSecret string
 	GoogleRedirectURI  string
+	// Login abuse protection
+	TurnstileSiteKey   string
+	TurnstileSecretKey string
 }
 
 func Load() *Config {
@@ -59,37 +62,39 @@ func Load() *Config {
 	}
 
 	return &Config{
-		DatabaseURL:    getEnv("DATABASE_URL", "postgres://clarin:clarin_secret_2026@localhost:5432/clarin?sslmode=disable"),
-		RedisURL:       getEnv("REDIS_URL", "redis://localhost:6379"),
-		JWTSecret:      getEnv("JWT_SECRET", "clarin_jwt_secret_change_in_production_2026"),
-		Port:           getEnv("PORT", "8080"),
-		Env:            getEnv("ENV", "development"),
-		AdminUser:      getEnv("ADMIN_USER", "admin"),
-		AdminPassword:  getEnv("ADMIN_PASSWORD", "clarin123"),
-		AdminEmail:     getEnv("ADMIN_EMAIL", "admin@clarin.local"),
-		CORSOrigins:    origins,
-		MinioEndpoint:  getEnv("MINIO_ENDPOINT", "localhost:9000"),
-		MinioAccessKey: getEnv("MINIO_ACCESS_KEY", "clarinadmin"),
-		MinioSecretKey: getEnv("MINIO_SECRET_KEY", "clarinadmin"),
-		MinioBucket:    getEnv("MINIO_BUCKET", "clarin-media"),
-		MinioUseSSL:    getEnv("MINIO_USE_SSL", "false") == "true",
-		MinioPublicURL: getEnv("MINIO_PUBLIC_URL", "http://localhost:9000"),
-		KommoSubdomain:    getEnv("KOMMO_SUBDOMAIN", ""),
-		KommoClientID:     getEnv("KOMMO_CLIENT_ID", ""),
-		KommoClientSecret: getEnv("KOMMO_CLIENT_SECRET", ""),
-		KommoAccessToken:  getEnv("KOMMO_ACCESS_TOKEN", ""),
-		KommoRedirectURI:  getEnv("KOMMO_REDIRECT_URI", ""),
-		KommoWebhookSecret: getEnv("KOMMO_WEBHOOK_SECRET", ""),
-		KommoProxyURL:      getEnv("KOMMO_PROXY_URL", getEnv("MEDIA_SOCKS5_PROXY", "")),
+		DatabaseURL:              getEnv("DATABASE_URL", "postgres://clarin:clarin_secret_2026@localhost:5432/clarin?sslmode=disable"),
+		RedisURL:                 getEnv("REDIS_URL", "redis://localhost:6379"),
+		JWTSecret:                getEnv("JWT_SECRET", "clarin_jwt_secret_change_in_production_2026"),
+		Port:                     getEnv("PORT", "8080"),
+		Env:                      getEnv("ENV", "development"),
+		AdminUser:                getEnv("ADMIN_USER", "admin"),
+		AdminPassword:            getEnv("ADMIN_PASSWORD", "clarin123"),
+		AdminEmail:               getEnv("ADMIN_EMAIL", "admin@clarin.local"),
+		CORSOrigins:              origins,
+		MinioEndpoint:            getEnv("MINIO_ENDPOINT", "localhost:9000"),
+		MinioAccessKey:           getEnv("MINIO_ACCESS_KEY", "clarinadmin"),
+		MinioSecretKey:           getEnv("MINIO_SECRET_KEY", "clarinadmin"),
+		MinioBucket:              getEnv("MINIO_BUCKET", "clarin-media"),
+		MinioUseSSL:              getEnv("MINIO_USE_SSL", "false") == "true",
+		MinioPublicURL:           getEnv("MINIO_PUBLIC_URL", "http://localhost:9000"),
+		KommoSubdomain:           getEnv("KOMMO_SUBDOMAIN", ""),
+		KommoClientID:            getEnv("KOMMO_CLIENT_ID", ""),
+		KommoClientSecret:        getEnv("KOMMO_CLIENT_SECRET", ""),
+		KommoAccessToken:         getEnv("KOMMO_ACCESS_TOKEN", ""),
+		KommoRedirectURI:         getEnv("KOMMO_REDIRECT_URI", ""),
+		KommoWebhookSecret:       getEnv("KOMMO_WEBHOOK_SECRET", ""),
+		KommoProxyURL:            getEnv("KOMMO_PROXY_URL", getEnv("MEDIA_SOCKS5_PROXY", "")),
 		KommoOutboxEnabled:       getEnvBool("KOMMO_OUTBOX_ENABLED", true),
 		KommoOutboxBatchSize:     getEnvInt("KOMMO_OUTBOX_BATCH_SIZE", 250),
 		KommoOutboxFlushInterval: getEnvDuration("KOMMO_OUTBOX_FLUSH_INTERVAL", 2*time.Second),
-		PublicURL:           getEnv("PUBLIC_URL", ""),
-		GeminiAPIKey:      getEnv("GEMINI_API_KEY", ""),
-		GroqAPIKey:        getEnv("GROQ_API_KEY", ""),
-		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
-		GoogleClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
-		GoogleRedirectURI:  getEnv("GOOGLE_REDIRECT_URI", ""),
+		PublicURL:                getEnv("PUBLIC_URL", ""),
+		GeminiAPIKey:             getEnv("GEMINI_API_KEY", ""),
+		GroqAPIKey:               getEnv("GROQ_API_KEY", ""),
+		GoogleClientID:           getEnv("GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret:       getEnv("GOOGLE_CLIENT_SECRET", ""),
+		GoogleRedirectURI:        getEnv("GOOGLE_REDIRECT_URI", ""),
+		TurnstileSiteKey:         getEnv("TURNSTILE_SITE_KEY", getEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "")),
+		TurnstileSecretKey:       getEnv("TURNSTILE_SECRET_KEY", ""),
 	}
 }
 

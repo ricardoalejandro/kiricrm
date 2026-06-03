@@ -37,6 +37,16 @@ func (c *Cache) Set(ctx context.Context, key string, value []byte, ttl time.Dura
 	return c.client.Set(ctx, key, value, ttl).Err()
 }
 
+func (c *Cache) IncrWithTTL(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	pipe := c.client.TxPipeline()
+	incr := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+	return incr.Val(), nil
+}
+
 func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	return c.client.Del(ctx, keys...).Err()
 }

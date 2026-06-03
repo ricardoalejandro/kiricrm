@@ -7,6 +7,7 @@ import {
   Plug, RefreshCw, AlertTriangle, HardDrive, Database, CheckCircle2,
   Activity, Eye, Send, Clock
 } from 'lucide-react'
+import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 
 interface Account {
   id: string
@@ -226,6 +227,7 @@ export default function AdminPage() {
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [passwordUserId, setPasswordUserId] = useState('')
   const [newPassword, setNewPassword] = useState('')
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState('')
 
   const [showPurgeModal, setShowPurgeModal] = useState(false)
   const [purgeAccount, setPurgeAccount] = useState<Account | null>(null)
@@ -269,7 +271,7 @@ export default function AdminPage() {
 
   // User form
   const [userForm, setUserForm] = useState({
-    account_id: '', username: '', email: '', password: '', display_name: '', role: 'agent'
+    account_id: '', username: '', email: '', password: '', password_confirm: '', display_name: '', role: 'agent'
   })
   const [userFormAssignments, setUserFormAssignments] = useState<NewUserAssignment[]>([])
 
@@ -492,14 +494,14 @@ export default function AdminPage() {
   function openCreateUser() {
     setEditingUser(null)
     const initialAccount = filterAccountId || accounts.find(a => a.is_active)?.id || ''
-    setUserForm({ account_id: initialAccount, username: '', email: '', password: '', display_name: '', role: 'agent' })
+    setUserForm({ account_id: initialAccount, username: '', email: '', password: '', password_confirm: '', display_name: '', role: 'agent' })
     setUserFormAssignments(initialAccount ? [{ account_id: initialAccount, role: 'agent', role_id: '', is_default: true }] : [])
     setShowUserModal(true)
   }
 
   function openEditUser(u: User) {
     setEditingUser(u)
-    setUserForm({ account_id: u.account_id, username: u.username, email: u.email, password: '', display_name: u.display_name, role: u.role })
+    setUserForm({ account_id: u.account_id, username: u.username, email: u.email, password: '', password_confirm: '', display_name: u.display_name, role: u.role })
     setUserFormAssignments([])
     setShowUserModal(true)
   }
@@ -541,6 +543,11 @@ export default function AdminPage() {
         alert(data.error || 'Error al guardar')
       }
     } else {
+      const passwordIssues = getPasswordIssues(userForm.password, userForm.password_confirm)
+      if (passwordIssues.length > 0) {
+        alert(`Usa una contraseña fuerte: ${passwordIssues.join(', ')}.`)
+        return
+      }
       const validAssignments = userFormAssignments.filter(item => item.account_id)
       const res = await fetch('/api/admin/users', {
         method: 'POST', headers, body: JSON.stringify({ ...userForm, accounts: validAssignments })
@@ -576,13 +583,19 @@ export default function AdminPage() {
 
   async function resetPassword() {
     if (!newPassword) return
+    const passwordIssues = getPasswordIssues(newPassword, newPasswordConfirm)
+    if (passwordIssues.length > 0) {
+      alert(`Usa una contraseña fuerte: ${passwordIssues.join(', ')}.`)
+      return
+    }
     const res = await fetch(`/api/admin/users/${passwordUserId}/password`, {
-      method: 'PATCH', headers, body: JSON.stringify({ password: newPassword })
+      method: 'PATCH', headers, body: JSON.stringify({ password: newPassword, password_confirm: newPasswordConfirm })
     })
     const data = await res.json()
     if (data.success) {
       setShowPasswordModal(false)
       setNewPassword('')
+      setNewPasswordConfirm('')
       alert('Contraseña actualizada')
     } else {
       alert(data.error || 'Error')
@@ -1252,7 +1265,7 @@ export default function AdminPage() {
                       <button onClick={() => openAssignModal(u)} className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded" title="Gestionar cuentas">
                         <Link2 className="w-4 h-4" />
                       </button>
-                      <button onClick={() => { setPasswordUserId(u.id); setNewPassword(''); setShowPasswordModal(true) }} className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded" title="Cambiar contraseña">
+                      <button onClick={() => { setPasswordUserId(u.id); setNewPassword(''); setNewPasswordConfirm(''); setShowPasswordModal(true) }} className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded" title="Cambiar contraseña">
                         <KeyRound className="w-4 h-4" />
                       </button>
                       <button onClick={() => toggleUser(u.id)} className="p-1.5 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 rounded" title={u.is_active ? 'Desactivar' : 'Activar'}>
@@ -1888,15 +1901,27 @@ export default function AdminPage() {
                 />
               </div>
               {!editingUser && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Contraseña</label>
-                  <input
-                    type="password"
-                    value={userForm.password}
-                    onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Contraseña</label>
+                    <input
+                      type="password"
+                      value={userForm.password}
+                      onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))}
+                      className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Confirmar contraseña</label>
+                    <input
+                      type="password"
+                      value={userForm.password_confirm}
+                      onChange={e => setUserForm(f => ({ ...f, password_confirm: e.target.value }))}
+                      className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+                  <PasswordStrengthChecklist password={userForm.password} confirmPassword={userForm.password_confirm} compact />
+                </>
               )}
               {editingUser && <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Rol</label>
@@ -1930,7 +1955,7 @@ export default function AdminPage() {
             <div className="p-6 border-b border-gray-200">
               <h2 className="text-lg font-semibold text-gray-900">Cambiar Contraseña</h2>
             </div>
-            <div className="p-6">
+            <div className="p-6 space-y-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">Nueva Contraseña</label>
               <input
                 type="password"
@@ -1939,6 +1964,17 @@ export default function AdminPage() {
                 className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
                 placeholder="Ingrese nueva contraseña"
               />
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Confirmar contraseña</label>
+                <input
+                  type="password"
+                  value={newPasswordConfirm}
+                  onChange={e => setNewPasswordConfirm(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  placeholder="Repita la nueva contraseña"
+                />
+              </div>
+              <PasswordStrengthChecklist password={newPassword} confirmPassword={newPasswordConfirm} compact />
             </div>
             <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
               <button onClick={() => setShowPasswordModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">

@@ -617,8 +617,8 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID uuid.UUID, curr
 		return fmt.Errorf("contraseña actual incorrecta")
 	}
 
-	if len(newPassword) < 8 {
-		return fmt.Errorf("la nueva contraseña debe tener al menos 8 caracteres")
+	if err := ValidateStrongPassword(newPassword); err != nil {
+		return err
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -682,8 +682,8 @@ func (s *AccountService) GetUsers(ctx context.Context, accountID *uuid.UUID) ([]
 }
 
 func (s *AccountService) CreateUser(ctx context.Context, user *domain.User, password string) error {
-	if len(password) < 8 {
-		return fmt.Errorf("la contraseña debe tener al menos 8 caracteres")
+	if err := ValidateStrongPassword(password); err != nil {
+		return err
 	}
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -708,8 +708,8 @@ func (s *AccountService) UpdateUser(ctx context.Context, user *domain.User) erro
 }
 
 func (s *AccountService) ResetPassword(ctx context.Context, userID uuid.UUID, password string) error {
-	if len(password) < 8 {
-		return fmt.Errorf("la contraseña debe tener al menos 8 caracteres")
+	if err := ValidateStrongPassword(password); err != nil {
+		return err
 	}
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {

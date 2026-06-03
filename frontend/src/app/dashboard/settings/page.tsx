@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation'
 import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe, Hash, Calendar, ToggleLeft, Mail, Phone, Link, DollarSign, Type, Tag, List, AlertCircle, HardDrive } from 'lucide-react'
 import { logoutFromBrowser, subscribeWebSocket } from '@/lib/api'
 import WhatsAppAPISettingsPanel from '@/components/WhatsAppAPISettingsPanel'
+import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 import { CustomFieldDefinition, CustomFieldType, CustomFieldOption, CustomFieldConfig } from '@/types/custom-field'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
@@ -1708,19 +1709,19 @@ export default function SettingsPage() {
       showMessage('error', 'Las contraseñas no coinciden')
       return
     }
-    if (formData.newPassword.length < 8) {
-      showMessage('error', 'La contraseña debe tener al menos 8 caracteres')
+    const passwordIssues = getPasswordIssues(formData.newPassword, formData.confirmPassword)
+    if (passwordIssues.length > 0) {
+      showMessage('error', `Usa una contraseña fuerte: ${passwordIssues.join(', ')}.`)
       return
     }
     setSaving(true)
-    const token = localStorage.getItem('token')
     try {
       const res = await fetch('/api/settings/password', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
         },
+        credentials: 'include',
         body: JSON.stringify({
           currentPassword: formData.currentPassword,
           newPassword: formData.newPassword,
@@ -3420,6 +3421,7 @@ export default function SettingsPage() {
                       className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400"
                     />
                   </div>
+                  <PasswordStrengthChecklist password={formData.newPassword} confirmPassword={formData.confirmPassword} compact />
                   <button
                     onClick={handleChangePassword}
                     disabled={saving || !formData.currentPassword || !formData.newPassword}

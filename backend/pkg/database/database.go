@@ -1784,6 +1784,21 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_subscriptions_period_end ON subscriptions(current_period_end) WHERE current_period_end IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS security_events (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			type VARCHAR(80) NOT NULL,
+			account_id UUID REFERENCES accounts(id) ON DELETE SET NULL,
+			user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			subject_hash VARCHAR(64) NOT NULL DEFAULT '',
+			ip_hash VARCHAR(64) NOT NULL DEFAULT '',
+			user_agent_hash VARCHAR(64) NOT NULL DEFAULT '',
+			metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_account_created ON security_events(account_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_user_created ON security_events(user_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_type_created ON security_events(type, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_ip_created ON security_events(ip_hash, created_at DESC)`,
 		`INSERT INTO plans (code, name, description, trial_days, is_public, sort_order)
 		VALUES
 			('free', 'Free', 'Plan gratuito interno para pruebas controladas.', 0, FALSE, 5),

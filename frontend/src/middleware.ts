@@ -25,7 +25,11 @@ export function middleware(request: NextRequest) {
     return new NextResponse('Not found', { status: 404 })
   }
 
-  if (isMarketingHost && (pathname === '/login' || pathname === '/signup' || pathname.startsWith('/dashboard'))) {
+  if (pathname === '/signup') {
+    return NextResponse.redirect(new URL('/login', isMarketingHost ? APP_URL : request.url))
+  }
+
+  if (isMarketingHost && (pathname === '/login' || pathname.startsWith('/dashboard'))) {
     return NextResponse.redirect(new URL(`${pathname}${request.nextUrl.search}`, APP_URL))
   }
 

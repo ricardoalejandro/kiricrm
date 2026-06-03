@@ -40,7 +40,6 @@ import (
 	"github.com/naperu/clarin/pkg/cache"
 	"github.com/naperu/clarin/pkg/config"
 	"github.com/naperu/clarin/pkg/database"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // strPtr returns a pointer to a string
@@ -59,6 +58,7 @@ type Server struct {
 	kommoSync    *kommo.SyncService
 	kommoManager *kommo.Manager
 	cache        *cache.Cache
+	abuseLimiter *inMemoryAbuseLimiter
 	googleClient *googleclient.Client
 	version      string
 	changelog    string
@@ -101,7 +101,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		CrossOriginOpenerPolicy:   "same-origin",
 		CrossOriginResourcePolicy: "same-origin",
 		PermissionPolicy:          "geolocation=(), microphone=(), camera=()",
-		ContentSecurityPolicy:     "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' wss: https:; font-src 'self' data:; frame-ancestors 'none'",
+		ContentSecurityPolicy:     "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' wss: https: https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self' data:; frame-ancestors 'none'",
 	}))
 
 	// Rate Limiting - 500 requests per minute per IP (skip media file serving)
@@ -158,10 +158,13 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		kommoSync:    kommoSyncSvc,
 		kommoManager: kommoManager,
 		cache:        c,
+		abuseLimiter: newInMemoryAbuseLimiter(),
 		googleClient: gc,
 		version:      version,
 		changelog:    changelogContent,
 	}
+
+	app.Use(server.validateBrowserOrigin)
 
 	// Version header middleware — adds X-Clarin-Version to all API responses
 	app.Use(func(c *fiber.Ctx) error {
@@ -234,6 +237,7 @@ func (s *Server) setupRoutes() {
 	// Version endpoint — public, returns version info and changelog
 	api.Get("/version", s.handleGetVersion)
 	api.Get("/public/plans", s.handleListPlans)
+	api.Get("/public/security-config", s.handlePublicSecurityConfig)
 
 	// Device health endpoint (protected) — detailed per-device metrics
 	// Registered after auth middleware setup below
@@ -258,9 +262,9 @@ func (s *Server) setupRoutes() {
 	// Auth routes (no auth required)
 	auth := api.Group("/auth")
 	auth.Post("/login", s.handleLogin)
-	auth.Post("/register", s.handleRegister)
 	auth.Post("/refresh", s.handleRefreshToken)
 	auth.Post("/logout", s.handleLogout)
+	auth.Post("/register", s.handleRegisterDisabled)
 
 	// Kommo webhook is only registered when Kommo API communication is explicitly re-enabled.
 	if kommo.APICommunicationEnabled {
@@ -794,13 +798,13 @@ func (s *Server) setupRoutes() {
 
 // Auth middleware
 func (s *Server) authMiddleware(c *fiber.Ctx) error {
-	authHeader := c.Get("Authorization")
-	if authHeader == "" {
-		// Try cookie
-		authHeader = c.Cookies("auth-token")
+	token := strings.TrimSpace(c.Cookies("auth-token"))
+	if token == "" {
+		authHeader := strings.TrimSpace(c.Get("Authorization"))
+		if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+			token = strings.TrimSpace(authHeader[7:])
+		}
 	}
-
-	token := strings.TrimPrefix(authHeader, "Bearer ")
 	if token == "" {
 		// Try query param (for file downloads)
 		token = c.Query("token")
@@ -888,10 +892,22 @@ func (s *Server) requirePermission(module string) fiber.Handler {
 // WebSocket upgrade middleware
 func (s *Server) wsUpgrade(c *fiber.Ctx) error {
 	if websocket.IsWebSocketUpgrade(c) {
-		// Validate token from query param
-		token := c.Query("token")
+		if origin := strings.TrimSpace(c.Get("Origin")); origin != "" && !s.isAllowedRequestOriginForRequest(c, origin) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Origin not allowed"})
+		}
+
+		token := strings.TrimSpace(c.Cookies("auth-token"))
 		if token == "" {
-			return c.Status(401).JSON(fiber.Map{"error": "Missing token"})
+			authHeader := strings.TrimSpace(c.Get("Authorization"))
+			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+				token = strings.TrimSpace(authHeader[7:])
+			}
+		}
+		if token == "" {
+			token = strings.TrimSpace(c.Query("token"))
+		}
+		if token == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing token"})
 		}
 
 		claims, err := s.services.Auth.ValidateToken(token, s.cfg.JWTSecret)
@@ -918,39 +934,35 @@ func (s *Server) wsUpgrade(c *fiber.Ctx) error {
 
 func (s *Server) handleLogin(c *fiber.Ctx) error {
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username       string `json:"username"`
+		Password       string `json:"password"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-
-	token, refreshToken, user, userAccounts, err := s.services.Auth.Login(c.Context(), req.Username, req.Password, s.cfg.JWTSecret)
-	if err != nil {
-		return c.Status(401).JSON(fiber.Map{"success": false, "error": err.Error()})
+	username := strings.TrimSpace(req.Username)
+	if err := s.checkLoginAbuseLimit(c, username); err != nil {
+		return err
+	}
+	if err := s.validateTurnstileLogin(c, username, req.TurnstileToken); err != nil {
+		return err
 	}
 
-	// Set access token cookie (short-lived, 1 hour)
-	c.Cookie(&fiber.Cookie{
-		Name:     "auth-token",
-		Value:    token,
-		Expires:  time.Now().Add(1 * time.Hour),
-		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
-		SameSite: "Lax",
-		Path:     "/",
+	token, refreshToken, user, userAccounts, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret)
+	if err != nil {
+		eventType := "login_failure"
+		if strings.Contains(strings.ToLower(err.Error()), "bloqueada") || strings.Contains(strings.ToLower(err.Error()), "bloqueado") {
+			eventType = "login_lockout"
+		}
+		s.recordSecurityEvent(c.Context(), eventType, username, c, map[string]interface{}{"reason": err.Error()})
+		return c.Status(401).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	s.recordSecurityEventWithRefs(c.Context(), "login_success", username, c, &user.AccountID, &user.ID, map[string]interface{}{
+		"account_name": user.AccountName,
 	})
 
-	// Set refresh token cookie (long-lived, 7 days, httpOnly)
-	c.Cookie(&fiber.Cookie{
-		Name:     "refresh-token",
-		Value:    refreshToken,
-		Expires:  time.Now().Add(7 * 24 * time.Hour),
-		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
-		SameSite: "Strict",
-		Path:     "/api/auth",
-	})
+	s.setAuthCookies(c, token, refreshToken)
 
 	// Build accounts list for response
 	accountsList := make([]fiber.Map, 0)
@@ -990,7 +1002,6 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"success": true,
-		"token":   token,
 		"user": fiber.Map{
 			"id":             user.ID,
 			"username":       user.Username,
@@ -1108,10 +1119,7 @@ func (s *Server) handleRefreshToken(c *fiber.Ctx) error {
 		Path:     "/api/auth",
 	})
 
-	return c.JSON(fiber.Map{
-		"success": true,
-		"token":   newToken,
-	})
+	return c.JSON(fiber.Map{"success": true})
 }
 
 func (s *Server) handleGetMe(c *fiber.Ctx) error {
@@ -1420,22 +1428,11 @@ func (s *Server) handleChangePassword(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
-	if len(req.NewPassword) < 8 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "La contraseña debe tener al menos 8 caracteres"})
+	if err := s.services.Auth.ChangePassword(c.Context(), userID, req.CurrentPassword, req.NewPassword); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-
-	user, err := s.services.Auth.GetUser(c.Context(), userID)
-	if err != nil || user == nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "User not found"})
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Contraseña actual incorrecta"})
-	}
-
-	if err := s.services.Account.ResetPassword(c.Context(), userID, req.NewPassword); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to change password"})
-	}
+	accountID, _ := c.Locals("account_id").(uuid.UUID)
+	s.recordSecurityEventWithRefs(c.Context(), "password_changed", "", c, &accountID, &userID, nil)
 
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -2163,6 +2160,15 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	}
 
 	if err != nil {
+		log.Printf("[SendMessage] failed account=%s device=%s to=%s media=%t quoted=%t error=%v",
+			accountID, deviceID, req.To, req.MediaURL != "" && req.MediaType != "", req.QuotedMessageID != "", err)
+		if strings.Contains(err.Error(), "server returned error 463") {
+			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+				"success": false,
+				"error":   "WhatsApp rechazo el envio (codigo 463). La cuenta puede seguir limitada o en enfriamiento tras el desbloqueo.",
+				"code":    "whatsapp_rejected_463",
+			})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -12469,14 +12475,15 @@ func (s *Server) handleAdminCreateUser(c *fiber.Ctx) error {
 		IsDefault bool    `json:"is_default"`
 	}
 	var req struct {
-		AccountID   string                     `json:"account_id"`
-		Username    string                     `json:"username"`
-		Email       string                     `json:"email"`
-		Password    string                     `json:"password"`
-		DisplayName string                     `json:"display_name"`
-		Role        string                     `json:"role"`
-		RoleID      *string                    `json:"role_id"`
-		Accounts    []accountAssignmentRequest `json:"accounts"`
+		AccountID       string                     `json:"account_id"`
+		Username        string                     `json:"username"`
+		Email           string                     `json:"email"`
+		Password        string                     `json:"password"`
+		PasswordConfirm string                     `json:"password_confirm"`
+		DisplayName     string                     `json:"display_name"`
+		Role            string                     `json:"role"`
+		RoleID          *string                    `json:"role_id"`
+		Accounts        []accountAssignmentRequest `json:"accounts"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -12486,6 +12493,12 @@ func (s *Server) handleAdminCreateUser(c *fiber.Ctx) error {
 	req.Email = strings.TrimSpace(req.Email)
 	if req.Username == "" || req.Password == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "username and password are required"})
+	}
+	if req.PasswordConfirm != "" && req.Password != req.PasswordConfirm {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Las contraseñas no coinciden"})
+	}
+	if err := service.ValidateStrongPassword(req.Password); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	if req.Email == "" {
 		req.Email = fmt.Sprintf("%s@users.clarin.local", strings.ToLower(req.Username))
@@ -12668,7 +12681,8 @@ func (s *Server) handleAdminResetPassword(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		Password string `json:"password"`
+		Password        string `json:"password"`
+		PasswordConfirm string `json:"password_confirm"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -12676,10 +12690,26 @@ func (s *Server) handleAdminResetPassword(c *fiber.Ctx) error {
 	if req.Password == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Password is required"})
 	}
+	if req.PasswordConfirm != "" && req.Password != req.PasswordConfirm {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Las contraseñas no coinciden"})
+	}
+	if err := service.ValidateStrongPassword(req.Password); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 
 	if err := s.services.Account.ResetPassword(c.Context(), id, req.Password); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.services.Auth.InvalidateUserSessions(id)
+	adminID, _ := c.Locals("user_id").(uuid.UUID)
+	targetUser, _ := s.services.Auth.GetUser(c.Context(), id)
+	var accountID *uuid.UUID
+	if targetUser != nil {
+		accountID = &targetUser.AccountID
+	}
+	s.recordSecurityEventWithRefs(c.Context(), "admin_password_changed", "", c, accountID, &id, map[string]interface{}{
+		"changed_by": adminID.String(),
+	})
 
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -12772,7 +12802,6 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"success": true,
-		"token":   token,
 		"user": fiber.Map{
 			"id":             user.ID,
 			"username":       user.Username,

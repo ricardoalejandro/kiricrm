@@ -49,6 +49,13 @@ intencionalmente desactivada.
 - No reactivar rutas o workers que llamen a Kommo sin una decisión explícita de producto y una revisión de seguridad de datos.
 - La importación CSV Kommo sí puede seguir funcionando porque es un flujo local y no llama a la API de Kommo.
 
+## Seguridad de Acceso
+
+- Clarín no permite registro público. No habilitar `/signup` ni `POST /api/auth/register`; los usuarios y cuentas se crean sólo desde el panel administrador.
+- El login en producción debe usar Cloudflare Turnstile con `TURNSTILE_SITE_KEY` y `TURNSTILE_SECRET_KEY` configurados como variables de entorno. Nunca commitear la clave secreta.
+- La autenticación real vive en cookies httpOnly (`auth-token` y `refresh-token`). El frontend sólo puede guardar un marcador de sesión en `localStorage`, no el JWT real.
+- Las contraseñas nuevas deben cumplir la política fuerte del backend: mínimo 10 caracteres, mayúscula, minúscula, número y símbolo.
+
 ---
 
 ## Arquitectura del Proyecto
