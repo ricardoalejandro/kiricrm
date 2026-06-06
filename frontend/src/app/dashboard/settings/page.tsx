@@ -1301,7 +1301,7 @@ export default function SettingsPage() {
   }
 
   const handleDeletePipeline = async (id: string, name: string) => {
-    if (!confirm(`¿Eliminar el pipeline "${name}" y todas sus etapas? Esta acción no se puede deshacer.`)) return
+    if (!confirm(`¿Eliminar el pipeline "${name}" y todas sus etapas?\n\nEsta acción es irreversible. Los leads asociados perderán su pipeline y etapa actual, y quedarán sin pipeline/etapa asignada.`)) return
     const token = localStorage.getItem('token')
     try {
       const res = await fetch(`/api/pipelines/${id}`, {
@@ -2351,7 +2351,7 @@ export default function SettingsPage() {
                 <div className="flex flex-wrap gap-3">
                   <button
                     onClick={async () => {
-                      const confirmText = prompt('Para eliminar TODOS los leads de esta cuenta, escribe "ELIMINAR" (en mayúsculas):')
+                      const confirmText = prompt('Para eliminar TODOS los leads de esta cuenta, escribe "ELIMINAR" (en mayúsculas). No se eliminarán contactos ni chats:')
                       if (confirmText !== 'ELIMINAR') {
                         if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe ELIMINAR para confirmar.')
                         return
@@ -2379,7 +2379,7 @@ export default function SettingsPage() {
                   </button>
                   <button
                     onClick={async () => {
-                      const confirmText = prompt('Para eliminar TODOS los contactos de esta cuenta, escribe "ELIMINAR" (en mayúsculas):')
+                      const confirmText = prompt('Para eliminar TODOS los contactos de esta cuenta, junto con sus leads, chats y mensajes, escribe "ELIMINAR" (en mayúsculas):')
                       if (confirmText !== 'ELIMINAR') {
                         if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe ELIMINAR para confirmar.')
                         return
@@ -2393,7 +2393,7 @@ export default function SettingsPage() {
                         })
                         const data = await res.json()
                         if (data.success) {
-                          showMessage('success', 'Todos los contactos han sido eliminados.')
+                          showMessage('success', 'Todos los contactos, sus leads, chats y mensajes han sido eliminados.')
                         } else {
                           showMessage('error', data.error || 'Error al eliminar contactos')
                         }
@@ -2407,7 +2407,7 @@ export default function SettingsPage() {
                   </button>
                   <button
                     onClick={async () => {
-                      const confirmText = prompt('Para eliminar TODOS los chats de esta cuenta, escribe "ELIMINAR" (en mayúsculas):')
+                      const confirmText = prompt('Para eliminar TODOS los chats de esta cuenta y sus mensajes, escribe "ELIMINAR" (en mayúsculas). No se eliminarán contactos ni leads:')
                       if (confirmText !== 'ELIMINAR') {
                         if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe ELIMINAR para confirmar.')
                         return

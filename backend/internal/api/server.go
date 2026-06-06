@@ -515,6 +515,10 @@ func (s *Server) setupRoutes() {
 	events.Put("/pipelines/:pid", s.handleUpdateEventPipeline)
 	events.Delete("/pipelines/:pid", s.handleDeleteEventPipeline)
 	events.Put("/pipelines/:pid/stages", s.handleReplaceEventPipelineStages)
+	events.Post("/:id/stages", s.handleCreateEventStage)
+	events.Put("/:id/stages/layout", s.handleSaveEventStageLayout)
+	events.Put("/:id/stages/:stageId", s.handleUpdateEventStage)
+	events.Delete("/:id/stages/:stageId", s.handleDeleteEventStage)
 	// Folder routes — must be declared BEFORE /:id to avoid param collision
 	events.Get("/folders", s.handleGetEventFolders)
 	events.Post("/folders", s.handleCreateEventFolder)
@@ -1864,6 +1868,14 @@ func (s *Server) invalidateChatCaches(accountID uuid.UUID, chatID *uuid.UUID) {
 	s.invalidateMessagesCache(accountID, chatID)
 }
 
+func (s *Server) invalidateContactTreeCaches(accountID uuid.UUID) {
+	s.invalidateContactsCache(accountID)
+	s.invalidateLeadsCache(accountID)
+	s.invalidateChatCaches(accountID, nil)
+	s.invalidateTagsCache(accountID)
+	s.invalidateEventsCache(accountID)
+}
+
 func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 	chatID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -2041,16 +2053,19 @@ func (s *Server) handleMarkAsRead(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeleteChat(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	chatID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
 	}
 
-	if err := s.services.Chat.Delete(c.Context(), chatID); err != nil {
+	if err := s.services.Chat.Delete(c.Context(), accountID, chatID); err != nil {
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	accountID := c.Locals("account_id").(uuid.UUID)
 	s.invalidateChatCaches(accountID, &chatID)
 	return c.JSON(fiber.Map{"success": true, "message": "Chat deleted"})
 }
@@ -2113,7 +2128,7 @@ func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No valid IDs provided"})
 	}
 
-	if err := s.services.Chat.DeleteBatch(c.Context(), uuids); err != nil {
+	if err := s.services.Chat.DeleteBatch(c.Context(), accountID, uuids); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -5442,7 +5457,10 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 		  AND l.contact_id IS NOT NULL
 	`, leadID)
 
-	if err := s.services.Lead.Delete(c.Context(), leadID); err != nil {
+	if err := s.services.Lead.Delete(c.Context(), accountID, leadID); err != nil {
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -5538,7 +5556,7 @@ func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 		  AND l.contact_id IS NOT NULL
 	`, uuids)
 
-	if err := s.services.Lead.DeleteBatch(c.Context(), uuids); err != nil {
+	if err := s.services.Lead.DeleteBatch(c.Context(), accountID, uuids); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -5984,14 +6002,22 @@ func (s *Server) handleUpdatePipeline(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeletePipeline(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pipelineID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
 	}
-	if err := s.services.Pipeline.Delete(c.Context(), pipelineID); err != nil {
+	pipeline, err := s.services.Pipeline.GetByID(c.Context(), pipelineID)
+	if err != nil || pipeline == nil || pipeline.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
+	}
+	if err := s.services.Pipeline.DeleteForAccount(c.Context(), pipelineID, accountID); err != nil {
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	s.invalidatePipelinesCache(c.Locals("account_id").(uuid.UUID))
+	s.invalidatePipelinesCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -6135,6 +6161,11 @@ type csvImportRecord struct {
 	DNI                string
 	BirthDate          *time.Time
 	Tags               []string
+	KommoSync          bool
+	KommoStatus        string
+	KommoCampaign      string
+	KommoFechaTag      string
+	KommoCreatedAt     *time.Time
 	CustomFields       map[string]interface{}
 	ExistingLeadID     *uuid.UUID
 	ExistingContactID  *uuid.UUID
@@ -6147,6 +6178,17 @@ type csvImportPlan struct {
 	Summary csvImportSummary
 	Records []csvImportRecord
 }
+
+var kommoStatusTagNames = []string{
+	"CONFIRMADO",
+	"FLUJO INCOMPLETO",
+	"OTRAS CONSULTAS",
+	"REVIVIÓ",
+	"NO RESPONDE",
+}
+
+const kommoImportFreshWindow = 24 * time.Hour
+const csvImportPreviewRowLimit = 500
 
 func (s *Server) handlePreviewImportCSV(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -6179,7 +6221,7 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 		}
 	}
 
-	result := s.executeCSVImportPlan(c.Context(), accountID, plan)
+	result := s.executeCSVImportPlan(c.Context(), accountID, userID, plan)
 	s.recordCSVImportLog(c.Context(), accountID, userID, result)
 
 	if result.Created > 0 || result.Updated > 0 {
@@ -6256,30 +6298,39 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 		}
 	}
 
-	phoneCol := findCol(colMap, "phone", "telefono", "teléfono", "celular", "número", "numero", "movil", "móvil")
-	if phoneCol == -1 {
-		phoneCol = detectPhoneColumn(headers, firstDataRow)
-	}
-	if phoneCol == -1 {
+	phoneCols := importPhoneColumns(headers, colMap, firstDataRow)
+	if len(phoneCols) == 0 {
 		return nil, fmt.Errorf("CSV must have a phone/telefono/celular column or a Kommo phone column")
 	}
 
 	idCol := findCol(colMap, "id", "kommo id", "kommo_id", "lead id", "id lead")
-	nameCol := findCol(colMap, "nombre completo", "name", "nombre", "nombre_completo")
+	nameCol := findCol(colMap, "nombre completo", "contacto principal", "nombre contacto", "nombre de contacto", "name", "nombre", "nombre_completo")
 	leadNameCol := findCol(colMap, "nombre del lead", "lead name")
-	emailCol := findCol(colMap, "email", "correo", "e-mail", "e-mail priv.", "otro e-mail")
-	notesCol := findCol(colMap, "notes", "notas", "observaciones", "nota")
-	tagsCol := findCol(colMap, "tags", "etiquetas")
-	companyCol := findCol(colMap, "company", "empresa")
+	emailCols := importEmailColumns(colMap)
+	notesCols := importNotesColumns(colMap)
+	tagsCol := findCol(colMap, "tags", "etiquetas", "etiquetas del lead")
+	companyCol := findCol(colMap, "company", "empresa", "compañía", "compania", "compañía del lead", "compania del lead")
 	lastNameCol := findCol(colMap, "last_name", "apellido", "apellidos")
 	dniCol := findCol(colMap, "dni", "documento", "doc_identidad")
 	birthDateCol := findCol(colMap, "fecha_nacimiento", "birth_date", "nacimiento", "cumpleanos", "cumpleaños")
+	kommoStatusCol := findCol(colMap, "estatus del lead")
+	kommoCampaignCol := findImportHeaderCol(headers, colMap, "campaña", "campania", "campana")
+	kommoFechaTagCol := findImportHeaderCol(headers, colMap, "fecha")
+	kommoCreatedAtCol := findImportHeaderCol(headers, colMap, "fecha de creación", "fecha de creacion", "fecha creación", "fecha creacion")
 	kommoFieldCols := kommoCSVFieldColumns(colMap)
+	source := detectImportSource(colMap)
+	useKommoFreshWindow := source == "kommo_csv"
+	if useKommoFreshWindow {
+		if kommoCreatedAtCol < 0 {
+			return nil, fmt.Errorf("el Excel de Kommo debe incluir la columna Fecha de Creación para proteger reimportaciones y actualizaciones de leads existentes")
+		}
+	}
+	importNow := time.Now().In(kommoImportLocation())
 
 	plan := &csvImportPlan{
 		Summary: csvImportSummary{
 			ImportType: importType,
-			Source:     detectImportSource(colMap),
+			Source:     source,
 			FileName:   fileName,
 			ImportTag:  importTag,
 			SafeMode:   true,
@@ -6320,8 +6371,8 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 		}
 		plan.Summary.TotalRows++
 
-		record := csvImportRecord{RowNum: rowNum, Action: "create"}
-		record.Phone = kommo.NormalizePhone(safeCol(row, phoneCol))
+		record := csvImportRecord{RowNum: rowNum, Action: "create", KommoSync: useKommoFreshWindow}
+		record.Phone = firstValidImportPhone(row, phoneCols)
 		if record.Phone == "" || len(record.Phone) < 6 {
 			record.Action = "skip"
 			record.Reason = "Sin teléfono válido"
@@ -6336,13 +6387,17 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 		if record.Name == "" {
 			record.Name = cleanLeadNameFallback(safeCol(row, leadNameCol))
 		}
-		record.Email = cleanCSVValue(safeCol(row, emailCol))
-		record.Notes = cleanCSVValue(safeCol(row, notesCol))
+		record.Email = firstValidImportEmail(row, emailCols)
+		record.Notes = joinImportNotes(row, notesCols)
 		record.Company = cleanCSVValue(safeCol(row, companyCol))
 		record.LastName = cleanCSVValue(safeCol(row, lastNameCol))
 		record.DNI = cleanCSVValue(safeCol(row, dniCol))
 		record.BirthDate = parseImportDate(safeCol(row, birthDateCol))
 		record.Tags = splitImportTags(safeCol(row, tagsCol))
+		record.KommoStatus = cleanCSVValue(safeCol(row, kommoStatusCol))
+		record.KommoCampaign = cleanCSVValue(safeCol(row, kommoCampaignCol))
+		record.KommoFechaTag = cleanCSVValue(safeCol(row, kommoFechaTagCol))
+		record.KommoCreatedAt = parseKommoCreationDate(safeCol(row, kommoCreatedAtCol))
 		record.CustomFields = extractKommoCustomFields(row, headers, kommoFieldCols)
 
 		if record.KommoID != nil {
@@ -6389,6 +6444,28 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 			plan.Summary.New++
 		}
 
+		if useKommoFreshWindow && leadID != nil {
+			windowReference, missingReason, staleReason := record.kommoWindowReference()
+			if windowReference == nil {
+				record.Action = "skip"
+				record.Reason = missingReason
+				plan.Summary.Existing--
+				plan.Summary.Skipped++
+				plan.addPreview(record.previewRow())
+				plan.Records = append(plan.Records, record)
+				continue
+			}
+			if !kommoImportWithinWindow(importNow, *windowReference) {
+				record.Action = "skip"
+				record.Reason = staleReason
+				plan.Summary.Existing--
+				plan.Summary.Skipped++
+				plan.addPreview(record.previewRow())
+				plan.Records = append(plan.Records, record)
+				continue
+			}
+		}
+
 		contactID, err := s.findCSVImportContact(ctx, accountID, record.JID)
 		if err != nil {
 			record.Action = "skip"
@@ -6416,7 +6493,7 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 }
 
 func (p *csvImportPlan) addPreview(row csvImportPreviewRow) {
-	if len(p.Summary.Rows) < 50 {
+	if len(p.Summary.Rows) < csvImportPreviewRowLimit {
 		p.Summary.Rows = append(p.Summary.Rows, row)
 	}
 }
@@ -6432,25 +6509,113 @@ func (r csvImportRecord) previewRow() csvImportPreviewRow {
 		ExistingLeadID: r.ExistingLeadIDText,
 	}
 	if row.Reason == "" {
-		switch r.Action {
-		case "create":
-			row.Reason = "Nuevo lead; usará la etapa entrante configurada"
-		case "update_existing":
-			row.Reason = "Existente; no se moverá de etapa ni se reemplazarán tags/notas"
-		}
+		row.Reason = r.previewReason()
 	}
 	return row
 }
 
-func (s *Server) executeCSVImportPlan(ctx context.Context, accountID uuid.UUID, plan *csvImportPlan) csvImportSummary {
+func (r csvImportRecord) previewReason() string {
+	switch r.Action {
+	case "create":
+		parts := []string{"Nuevo lead; usará la etapa entrante configurada"}
+		if r.KommoSync {
+			parts = append(parts, "el alta no se bloquea por la ventana de 24h; esa ventana sólo limitará reimportaciones futuras")
+		}
+		if r.WillCreateContact {
+			parts = append(parts, "creará contacto vinculado")
+		}
+		if r.KommoSync {
+			if statusTagName := canonicalKommoStatusTagName(r.KommoStatus); statusTagName != "" {
+				parts = append(parts, "sincronizará etiqueta de estado Kommo: "+statusTagName)
+			} else {
+				parts = append(parts, "quitará etiquetas de estado Kommo previas si existen")
+			}
+		}
+		if r.KommoSync {
+			if r.KommoFechaTag != "" {
+				parts = append(parts, "reemplazará etiqueta fecha Kommo por: "+r.KommoFechaTag)
+			} else {
+				parts = append(parts, "quitará etiqueta fecha Kommo previa si existe")
+			}
+		}
+		if len(r.Tags) > 0 {
+			parts = append(parts, "etiquetas del Excel: "+strings.Join(r.Tags, ", "))
+		}
+		if note := buildKommoImportObservation(r.KommoStatus, r.KommoCampaign); note != "" {
+			parts = append(parts, "observación: "+note)
+		}
+		return strings.Join(parts, "\n")
+	case "update_existing":
+		parts := []string{"Existente; no moverá etapa/pipeline ni tocará notas, tareas u observaciones"}
+		hasApplicableChange := false
+		if r.KommoSync {
+			if statusTagName := canonicalKommoStatusTagName(r.KommoStatus); statusTagName != "" {
+				parts = append(parts, "sincronizará etiqueta de estado Kommo: "+statusTagName)
+			} else {
+				parts = append(parts, "quitará etiquetas de estado Kommo previas si existen")
+			}
+			hasApplicableChange = true
+		}
+		if r.KommoSync {
+			if r.KommoFechaTag != "" {
+				parts = append(parts, "reemplazará etiqueta fecha Kommo por: "+r.KommoFechaTag)
+			} else {
+				parts = append(parts, "quitará etiqueta fecha Kommo previa si existe")
+			}
+			hasApplicableChange = true
+		}
+		if !hasApplicableChange {
+			parts = append(parts, "sin cambios aplicables dentro del modo seguro")
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return r.Reason
+	}
+}
+
+func (r csvImportRecord) kommoWindowReference() (*time.Time, string, string) {
+	return r.KommoCreatedAt,
+		"Sin Fecha de Creación válida; no se aplicó ningún cambio",
+		"Fuera de ventana 24h desde la creación Kommo"
+}
+
+func (s *Server) executeCSVImportPlan(ctx context.Context, accountID, userID uuid.UUID, plan *csvImportPlan) csvImportSummary {
 	result := plan.Summary
 	result.Created = 0
 	result.Updated = 0
+	syncKommoMetadata := plan.Summary.Source == "kommo_csv"
 	for _, record := range plan.Records {
 		if record.Action == "skip" {
 			continue
 		}
-		contact, contactCreated, contactUpdated, err := s.ensureCSVImportContact(ctx, accountID, record)
+		if record.Action == "update_existing" {
+			if record.ExistingLeadID != nil {
+				changed := false
+				if syncKommoMetadata {
+					statusChanged, err := s.syncCSVImportExistingLeadStatusTag(ctx, accountID, *record.ExistingLeadID, record.KommoStatus)
+					if err != nil {
+						result.Skipped++
+						result.ErrorCount++
+						result.Errors = append(result.Errors, fmt.Sprintf("fila %d: etiqueta de estado: %s", record.RowNum, err.Error()))
+						continue
+					}
+					changed = changed || statusChanged
+					fechaChanged, err := s.repos.Tag.SyncKommoFechaTagForLead(ctx, accountID, *record.ExistingLeadID, record.KommoFechaTag)
+					if err != nil {
+						result.Skipped++
+						result.ErrorCount++
+						result.Errors = append(result.Errors, fmt.Sprintf("fila %d: etiqueta fecha: %s", record.RowNum, err.Error()))
+						continue
+					}
+					changed = changed || fechaChanged
+				}
+				if changed {
+					result.Updated++
+				}
+			}
+			continue
+		}
+		contact, contactCreated, _, err := s.ensureCSVImportContact(ctx, accountID, record)
 		if err != nil {
 			result.Skipped++
 			result.ErrorCount++
@@ -6460,26 +6625,6 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID uuid.UUID, 
 		if contactCreated {
 			// Already included in preview NewContacts; no extra counter needed here.
 		}
-		if record.Action == "update_existing" {
-			if record.ExistingLeadID != nil {
-				var contactID *uuid.UUID
-				if contact != nil {
-					contactID = &contact.ID
-				}
-				if err := s.linkCSVImportLead(ctx, *record.ExistingLeadID, contactID, record.KommoID); err != nil {
-					result.Skipped++
-					result.ErrorCount++
-					result.Errors = append(result.Errors, fmt.Sprintf("fila %d: lead existente: %s", record.RowNum, err.Error()))
-					continue
-				}
-			}
-			if contactUpdated || record.LinkKommoToLead {
-				result.Updated++
-			} else {
-				result.Updated++
-			}
-			continue
-		}
 		if plan.Summary.ImportType == "contacts" {
 			if contactCreated {
 				result.Created++
@@ -6488,7 +6633,7 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID uuid.UUID, 
 			}
 			continue
 		}
-		if err := s.createCSVImportLead(ctx, accountID, record, contact, plan.Summary.ImportTag); err != nil {
+		if err := s.createCSVImportLead(ctx, accountID, userID, record, contact, plan.Summary.ImportTag, syncKommoMetadata); err != nil {
 			result.Skipped++
 			result.ErrorCount++
 			result.Errors = append(result.Errors, fmt.Sprintf("fila %d: lead: %s", record.RowNum, err.Error()))
@@ -6499,7 +6644,7 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID uuid.UUID, 
 	return result
 }
 
-func (s *Server) createCSVImportLead(ctx context.Context, accountID uuid.UUID, record csvImportRecord, contact *domain.Contact, importTag string) error {
+func (s *Server) createCSVImportLead(ctx context.Context, accountID, userID uuid.UUID, record csvImportRecord, contact *domain.Contact, importTag string, syncKommoMetadata bool) error {
 	pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID)
 	if err != nil {
 		return err
@@ -6534,6 +6679,29 @@ func (s *Server) createCSVImportLead(ctx context.Context, accountID uuid.UUID, r
 	if len(tags) > 0 {
 		if err := s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, lead.ID, tags); err != nil {
 			log.Printf("[CSV Import] Failed to sync tags for lead %s: %v", lead.ID, err)
+		}
+	}
+	if syncKommoMetadata {
+		if _, err := s.syncCSVImportExistingLeadStatusTag(ctx, accountID, lead.ID, record.KommoStatus); err != nil {
+			log.Printf("[CSV Import] Failed to sync Kommo status tag for lead %s: %v", lead.ID, err)
+		}
+		if _, err := s.repos.Tag.SyncKommoFechaTagForLead(ctx, accountID, lead.ID, record.KommoFechaTag); err != nil {
+			log.Printf("[CSV Import] Failed to sync Kommo fecha tag for lead %s: %v", lead.ID, err)
+		}
+	}
+	if note := buildKommoImportObservation(record.KommoStatus, record.KommoCampaign); note != "" {
+		interaction := &domain.Interaction{
+			AccountID: accountID,
+			LeadID:    &lead.ID,
+			Type:      domain.InteractionTypeNote,
+			Notes:     &note,
+			CreatedBy: &userID,
+		}
+		if contact != nil {
+			interaction.ContactID = &contact.ID
+		}
+		if err := s.services.Interaction.LogInteraction(ctx, interaction); err != nil {
+			log.Printf("[CSV Import] Failed to create Komo observation for lead %s: %v", lead.ID, err)
 		}
 	}
 	return nil
@@ -6596,6 +6764,71 @@ func fillEmptyContactFields(contact *domain.Contact, record csvImportRecord) boo
 		changed = true
 	}
 	return changed
+}
+
+func (s *Server) syncCSVImportExistingLeadStatusTag(ctx context.Context, accountID, leadID uuid.UUID, status string) (bool, error) {
+	var contactID *uuid.UUID
+	err := s.repos.DB().QueryRow(ctx, `
+		SELECT contact_id
+		FROM leads
+		WHERE id = $1 AND account_id = $2
+	`, leadID, accountID).Scan(&contactID)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if contactID == nil {
+		return false, nil
+	}
+
+	currentNames, err := s.currentKommoStatusTagNamesForContact(ctx, accountID, *contactID)
+	if err != nil {
+		return false, err
+	}
+	statusTagName := canonicalKommoStatusTagName(status)
+	if statusTagName == "" {
+		if len(currentNames) == 0 {
+			return false, nil
+		}
+		if err := s.repos.Tag.RemoveKommoStatusTagsForContact(ctx, accountID, *contactID, kommoStatusTagNames); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if len(currentNames) == 1 && canonicalKommoStatusTagName(currentNames[0]) == statusTagName {
+		return false, nil
+	}
+	if err := s.repos.Tag.SyncKommoStatusTagForContact(ctx, accountID, *contactID, statusTagName, kommoStatusTagNames); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Server) currentKommoStatusTagNamesForContact(ctx context.Context, accountID, contactID uuid.UUID) ([]string, error) {
+	rows, err := s.repos.DB().Query(ctx, `
+		SELECT t.name
+		FROM contact_tags ct
+		JOIN tags t ON t.id = ct.tag_id
+		WHERE ct.contact_id = $1
+		  AND t.account_id = $2
+		  AND lower(trim(regexp_replace(t.name, '\s+', ' ', 'g'))) = ANY($3)
+	`, contactID, accountID, normalizedKommoStatusTagNames())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	names := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
 }
 
 func (s *Server) linkCSVImportLead(ctx context.Context, leadID uuid.UUID, contactID *uuid.UUID, kommoID *int64) error {
@@ -6740,6 +6973,70 @@ func normalizeImportHeader(header string) string {
 	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(header, "\ufeff")))
 }
 
+func normalizeImportHeaderForLookup(header string) string {
+	value := normalizeImportHeader(header)
+	value = strings.NewReplacer(
+		"✅", "",
+		"✔", "",
+		"☑", "",
+		"‼️", "",
+		"‼", "",
+		"⚠️", "",
+		"⚠", "",
+	).Replace(value)
+	value = strings.Trim(value, " \t\r\n:-_•*·.")
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func importPhoneColumns(headers []string, colMap map[string]int, firstDataRow []string) []int {
+	cols := make([]int, 0, 4)
+	seen := map[int]bool{}
+	add := func(idx int) {
+		if idx >= 0 && !seen[idx] {
+			cols = append(cols, idx)
+			seen[idx] = true
+		}
+	}
+
+	for _, key := range []string{
+		"phone", "telefono", "teléfono", "celular", "número", "numero", "movil", "móvil",
+		"teléfono oficina (contacto)", "telefono oficina (contacto)",
+		"teléfono oficina directo (contacto)", "telefono oficina directo (contacto)",
+		"teléfono celular (contacto)", "telefono celular (contacto)",
+		"teléfono de casa (contacto)", "telefono de casa (contacto)",
+		"otro teléfono (contacto)", "otro telefono (contacto)",
+	} {
+		add(findCol(colMap, key))
+	}
+
+	for i, header := range headers {
+		normalized := normalizeImportHeader(header)
+		if strings.Contains(normalized, "teléfono") ||
+			strings.Contains(normalized, "telefono") ||
+			strings.Contains(normalized, "celular") ||
+			strings.Contains(normalized, "móvil") ||
+			strings.Contains(normalized, "movil") ||
+			strings.Contains(normalized, "phone") {
+			add(i)
+		}
+	}
+
+	if len(cols) == 0 {
+		add(detectPhoneColumn(headers, firstDataRow))
+	}
+	return cols
+}
+
+func firstValidImportPhone(row []string, cols []int) string {
+	for _, col := range cols {
+		phone := kommo.NormalizePhone(safeCol(row, col))
+		if len(phone) >= 6 {
+			return phone
+		}
+	}
+	return ""
+}
+
 func detectPhoneColumn(headers []string, row []string) int {
 	bestCol := -1
 	bestScore := 0
@@ -6795,6 +7092,71 @@ func detectImportSource(colMap map[string]int) string {
 	return "csv"
 }
 
+func importEmailColumns(colMap map[string]int) []int {
+	cols := make([]int, 0, 4)
+	seen := map[int]bool{}
+	for _, key := range []string{
+		"email", "correo", "correo (contacto)", "e-mail", "e-mail priv.", "e-mail priv. (contacto)", "otro e-mail", "otro e-mail (contacto)",
+	} {
+		idx := findCol(colMap, key)
+		if idx >= 0 && !seen[idx] {
+			cols = append(cols, idx)
+			seen[idx] = true
+		}
+	}
+	sort.Ints(cols)
+	return cols
+}
+
+func firstValidImportEmail(row []string, cols []int) string {
+	for _, col := range cols {
+		value := cleanCSVValue(safeCol(row, col))
+		for _, candidate := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t'
+		}) {
+			email := strings.TrimSpace(candidate)
+			if strings.Count(email, "@") == 1 && strings.Contains(email, ".") && !strings.Contains(email, " ") {
+				return email
+			}
+		}
+	}
+	return ""
+}
+
+func importNotesColumns(colMap map[string]int) []int {
+	cols := make([]int, 0, 5)
+	seen := map[int]bool{}
+	for _, key := range []string{
+		"notes", "notas", "observaciones", "nota", "nota 1", "nota 2", "nota 3", "nota 4", "nota 5",
+	} {
+		idx := findCol(colMap, key)
+		if idx >= 0 && !seen[idx] {
+			cols = append(cols, idx)
+			seen[idx] = true
+		}
+	}
+	sort.Ints(cols)
+	return cols
+}
+
+func joinImportNotes(row []string, cols []int) string {
+	parts := make([]string, 0, len(cols))
+	seen := map[string]bool{}
+	for _, col := range cols {
+		value := cleanCSVValue(safeCol(row, col))
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, "\n")
+}
+
 func kommoCSVFieldColumns(colMap map[string]int) map[string]int {
 	keys := []string{
 		"estatus del lead", "embudo de ventas", "status", "detec cam", "grupo", "otras",
@@ -6848,6 +7210,54 @@ func parseImportDate(value string) *time.Time {
 	return nil
 }
 
+func parseKommoCreationDate(value string) *time.Time {
+	value = cleanCSVValue(value)
+	if value == "" {
+		return nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		parsed = parsed.In(kommoImportLocation())
+		return &parsed
+	}
+	loc := kommoImportLocation()
+	formats := []string{
+		"02.01.2006 15:04:05",
+		"02.01.2006 15:04",
+		"02/01/2006 15:04:05",
+		"02/01/2006 15:04",
+		"02-01-2006 15:04:05",
+		"02-01-2006 15:04",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+		"02.01.2006",
+		"02/01/2006",
+		"02-01-2006",
+	}
+	for _, layout := range formats {
+		if parsed, err := time.ParseInLocation(layout, value, loc); err == nil {
+			return &parsed
+		}
+	}
+	return nil
+}
+
+func kommoImportLocation() *time.Location {
+	loc, err := time.LoadLocation("America/Lima")
+	if err == nil {
+		return loc
+	}
+	return time.FixedZone("America/Lima", -5*60*60)
+}
+
+func kommoImportWithinWindow(now, reference time.Time) bool {
+	elapsed := now.Sub(reference)
+	if elapsed < 0 {
+		return true
+	}
+	return elapsed <= kommoImportFreshWindow
+}
+
 func splitImportTags(value string) []string {
 	value = cleanCSVValue(value)
 	if value == "" {
@@ -6894,6 +7304,55 @@ func appendImportTag(tags []string, importTag string) []string {
 		merged = append(merged, importTag)
 	}
 	return merged
+}
+
+func buildKommoImportObservation(status, campaign string) string {
+	parts := make([]string, 0, 2)
+	if status = cleanCSVValue(status); status != "" {
+		parts = append(parts, "Status: "+status)
+	}
+	if campaign = cleanCSVValue(campaign); campaign != "" {
+		parts = append(parts, "Campaña: "+campaign)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Komo: " + strings.Join(parts, "; ")
+}
+
+func normalizeKommoStatusTagName(value string) string {
+	value = cleanCSVValue(value)
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+func canonicalKommoStatusTagName(value string) string {
+	normalized := normalizeKommoStatusTagName(value)
+	if normalized == "" {
+		return ""
+	}
+	for _, name := range kommoStatusTagNames {
+		if normalizeKommoStatusTagName(name) == normalized {
+			return name
+		}
+	}
+	return ""
+}
+
+func normalizedKommoStatusTagNames() []string {
+	names := make([]string, 0, len(kommoStatusTagNames))
+	seen := map[string]bool{}
+	for _, name := range kommoStatusTagNames {
+		normalized := normalizeKommoStatusTagName(name)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		names = append(names, normalized)
+	}
+	return names
 }
 
 func extractKommoCustomFields(row, headers []string, cols map[string]int) map[string]interface{} {
@@ -6958,6 +7417,21 @@ func findCol(colMap map[string]int, keys ...string) int {
 	for _, key := range keys {
 		if idx, ok := colMap[key]; ok {
 			return idx
+		}
+	}
+	return -1
+}
+
+func findImportHeaderCol(headers []string, colMap map[string]int, keys ...string) int {
+	if idx := findCol(colMap, keys...); idx >= 0 {
+		return idx
+	}
+	for _, key := range keys {
+		normalizedKey := normalizeImportHeaderForLookup(key)
+		for i, header := range headers {
+			if normalizeImportHeaderForLookup(header) == normalizedKey {
+				return i
+			}
 		}
 	}
 	return -1
@@ -7400,10 +7874,13 @@ func (s *Server) handleDeleteContact(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid id"})
 	}
 
-	if err := s.services.Contact.Delete(c.Context(), id); err != nil {
+	if err := s.services.Contact.Delete(c.Context(), accountID, id); err != nil {
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Contact not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	s.invalidateContactsCache(accountID)
+	s.invalidateContactTreeCaches(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -7491,7 +7968,7 @@ func (s *Server) handleDeleteContactsBatch(c *fiber.Ctx) error {
 		if err := s.services.Contact.DeleteAll(c.Context(), accountID); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
-		s.invalidateContactsCache(accountID)
+		s.invalidateContactTreeCaches(accountID)
 		return c.JSON(fiber.Map{"success": true, "message": "All contacts deleted"})
 	}
 
@@ -7499,10 +7976,10 @@ func (s *Server) handleDeleteContactsBatch(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "provide ids array or delete_all"})
 	}
 
-	if err := s.services.Contact.DeleteBatch(c.Context(), body.IDs); err != nil {
+	if err := s.services.Contact.DeleteBatch(c.Context(), accountID, body.IDs); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	s.invalidateContactsCache(accountID)
+	s.invalidateContactTreeCaches(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -11319,6 +11796,269 @@ func (s *Server) handleReplaceEventPipelineStages(c *fiber.Ctx) error {
 	// Return updated stages
 	updatedStages, _ := s.services.Event.GetPipelineStages(c.Context(), pid)
 	return c.JSON(fiber.Map{"success": true, "stages": updatedStages})
+}
+
+func (s *Server) ensureDedicatedEventPipeline(ctx context.Context, accountID uuid.UUID, event *domain.Event) (uuid.UUID, map[uuid.UUID]uuid.UUID, error) {
+	if event.PipelineID == nil {
+		defPipeline, err := s.repos.EventPipeline.EnsureDefaultByAccountID(ctx, accountID)
+		if err != nil {
+			return uuid.Nil, nil, err
+		}
+		if defPipeline == nil {
+			return uuid.Nil, nil, fmt.Errorf("event pipeline not found")
+		}
+		event.PipelineID = &defPipeline.ID
+		if err := s.services.Event.Update(ctx, event); err != nil {
+			return uuid.Nil, nil, err
+		}
+	}
+	return s.services.Event.EnsureDedicatedPipelineForEvent(ctx, event.ID, accountID, *event.PipelineID, event.Name)
+}
+
+func (s *Server) handleCreateEventStage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	event, err := s.services.Event.GetByID(c.Context(), eventID)
+	if err != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
+	var req struct {
+		Name  string `json:"name"`
+		Color string `json:"color"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	if strings.TrimSpace(req.Color) == "" {
+		req.Color = "#6366f1"
+	}
+	pipelineID, _, err := s.ensureDedicatedEventPipeline(c.Context(), accountID, event)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	stage := &domain.EventPipelineStage{
+		PipelineID: pipelineID,
+		Name:       req.Name,
+		Color:      req.Color,
+	}
+	if err := s.services.Event.CreatePipelineStage(c.Context(), stage); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	stages, _ := s.services.Event.GetPipelineStages(c.Context(), pipelineID)
+	s.invalidateEventsCache(accountID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stages_changed"})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "stage": stage, "stages": stages, "pipeline_id": pipelineID.String()})
+}
+
+func (s *Server) handleUpdateEventStage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	stageID, err := uuid.Parse(c.Params("stageId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
+	}
+	event, err := s.services.Event.GetByID(c.Context(), eventID)
+	if err != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
+	var req struct {
+		Name  *string `json:"name"`
+		Color *string `json:"color"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name != nil {
+		trimmed := strings.TrimSpace(*req.Name)
+		if trimmed == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+		}
+		req.Name = &trimmed
+	}
+	if req.Color != nil {
+		trimmed := strings.TrimSpace(*req.Color)
+		if trimmed == "" {
+			req.Color = nil
+		} else {
+			req.Color = &trimmed
+		}
+	}
+	pipelineID, stageMap, err := s.ensureDedicatedEventPipeline(c.Context(), accountID, event)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if mappedID, ok := stageMap[stageID]; ok {
+		stageID = mappedID
+	}
+	stage, err := s.services.Event.UpdatePipelineStage(c.Context(), pipelineID, stageID, req.Name, req.Color)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Stage not found"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	stages, _ := s.services.Event.GetPipelineStages(c.Context(), pipelineID)
+	s.invalidateEventsCache(accountID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stages_changed"})
+	}
+	return c.JSON(fiber.Map{"success": true, "stage": stage, "stages": stages, "pipeline_id": pipelineID.String()})
+}
+
+func (s *Server) handleDeleteEventStage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	stageID, err := uuid.Parse(c.Params("stageId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
+	}
+	event, err := s.services.Event.GetByID(c.Context(), eventID)
+	if err != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
+	pipelineID, stageMap, err := s.ensureDedicatedEventPipeline(c.Context(), accountID, event)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if mappedID, ok := stageMap[stageID]; ok {
+		stageID = mappedID
+	}
+	if err := s.services.Event.DeletePipelineStageForEvent(c.Context(), eventID, pipelineID, stageID); err != nil {
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Stage not found"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	stages, _ := s.services.Event.GetPipelineStages(c.Context(), pipelineID)
+	s.invalidateEventsCache(accountID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stages_changed"})
+	}
+	return c.JSON(fiber.Map{"success": true, "stages": stages, "pipeline_id": pipelineID.String()})
+}
+
+func (s *Server) handleSaveEventStageLayout(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	event, err := s.services.Event.GetByID(c.Context(), eventID)
+	if err != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
+
+	var req struct {
+		Stages []struct {
+			ID       *string `json:"id"`
+			ClientID string  `json:"clientId"`
+			Name     string  `json:"name"`
+			Color    string  `json:"color"`
+			Position int     `json:"position"`
+		} `json:"stages"`
+		Deletions []struct {
+			ID     string `json:"id"`
+			MoveTo struct {
+				Kind string `json:"kind"`
+				ID   string `json:"id"`
+			} `json:"moveTo"`
+		} `json:"deletions"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if len(req.Stages) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "At least one stage is required"})
+	}
+
+	pipelineID, stageMap, err := s.ensureDedicatedEventPipeline(c.Context(), accountID, event)
+	if err != nil {
+		log.Printf("[EVENT_STAGES] ensure dedicated pipeline error event=%s account=%s: %v", eventID, accountID, err)
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	stages := make([]repository.EventStageLayoutStage, 0, len(req.Stages))
+	for idx, item := range req.Stages {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Stage name is required"})
+		}
+		color := strings.TrimSpace(item.Color)
+		if color == "" {
+			color = "#6366f1"
+		}
+		stage := repository.EventStageLayoutStage{
+			Name:     name,
+			Color:    color,
+			Position: idx,
+		}
+		if item.ID != nil && strings.TrimSpace(*item.ID) != "" {
+			parsedID, err := uuid.Parse(strings.TrimSpace(*item.ID))
+			if err != nil {
+				return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
+			}
+			if mappedID, ok := stageMap[parsedID]; ok {
+				parsedID = mappedID
+			}
+			stage.ID = &parsedID
+		}
+		stages = append(stages, stage)
+	}
+
+	deletions := make([]repository.EventStageLayoutDeletion, 0, len(req.Deletions))
+	for _, item := range req.Deletions {
+		stageID, err := uuid.Parse(strings.TrimSpace(item.ID))
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid deletion stage ID"})
+		}
+		if mappedID, ok := stageMap[stageID]; ok {
+			stageID = mappedID
+		}
+		if strings.TrimSpace(item.MoveTo.Kind) != "stage" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Move destination must be a stage"})
+		}
+		moveToID, err := uuid.Parse(strings.TrimSpace(item.MoveTo.ID))
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid move destination stage ID"})
+		}
+		if mappedID, ok := stageMap[moveToID]; ok {
+			moveToID = mappedID
+		}
+		deletions = append(deletions, repository.EventStageLayoutDeletion{
+			ID:            stageID,
+			MoveToStageID: moveToID,
+		})
+	}
+
+	if err := s.services.Event.SavePipelineStageLayoutForEvent(c.Context(), eventID, pipelineID, stages, deletions); err != nil {
+		log.Printf("[EVENT_STAGES] save layout error event=%s pipeline=%s: %v", eventID, pipelineID, err)
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Stage not found"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	updatedStages, _ := s.services.Event.GetPipelineStages(c.Context(), pipelineID)
+	s.invalidateEventsCache(accountID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stages_layout_changed"})
+	}
+	return c.JSON(fiber.Map{"success": true, "stages": updatedStages, "pipeline_id": pipelineID.String()})
 }
 
 func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {

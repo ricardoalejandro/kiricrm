@@ -969,25 +969,31 @@ func (r *ChatRepository) MarkAsRead(ctx context.Context, chatID uuid.UUID) error
 	return err
 }
 
-func (r *ChatRepository) Delete(ctx context.Context, id uuid.UUID) error {
+func (r *ChatRepository) Delete(ctx context.Context, accountID, id uuid.UUID) error {
 	// First delete all messages in the chat
-	_, err := r.db.Exec(ctx, `DELETE FROM messages WHERE chat_id = $1`, id)
+	_, err := r.db.Exec(ctx, `DELETE FROM messages WHERE account_id = $1 AND chat_id = $2`, accountID, id)
 	if err != nil {
 		return err
 	}
 	// Then delete the chat
-	_, err = r.db.Exec(ctx, `DELETE FROM chats WHERE id = $1`, id)
-	return err
+	cmd, err := r.db.Exec(ctx, `DELETE FROM chats WHERE account_id = $1 AND id = $2`, accountID, id)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
-func (r *ChatRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
+func (r *ChatRepository) DeleteBatch(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID) error {
 	// First delete all messages in the chats
-	_, err := r.db.Exec(ctx, `DELETE FROM messages WHERE chat_id = ANY($1)`, ids)
+	_, err := r.db.Exec(ctx, `DELETE FROM messages WHERE account_id = $1 AND chat_id = ANY($2)`, accountID, ids)
 	if err != nil {
 		return err
 	}
 	// Then delete the chats
-	_, err = r.db.Exec(ctx, `DELETE FROM chats WHERE id = ANY($1)`, ids)
+	_, err = r.db.Exec(ctx, `DELETE FROM chats WHERE account_id = $1 AND id = ANY($2)`, accountID, ids)
 	return err
 }
 
@@ -1708,19 +1714,105 @@ func (r *ContactRepository) UpdateAvatarURL(ctx context.Context, accountID uuid.
 	return changed, err
 }
 
-func (r *ContactRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM contacts WHERE id = $1`, id)
-	return err
+func (r *ContactRepository) Delete(ctx context.Context, accountID, id uuid.UUID) error {
+	return r.deleteTree(ctx, accountID, []uuid.UUID{id}, false)
 }
 
-func (r *ContactRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM contacts WHERE id = ANY($1)`, ids)
-	return err
+func (r *ContactRepository) DeleteBatch(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID) error {
+	return r.deleteTree(ctx, accountID, ids, false)
 }
 
 func (r *ContactRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM contacts WHERE account_id = $1`, accountID)
-	return err
+	return r.deleteTree(ctx, accountID, nil, true)
+}
+
+func (r *ContactRepository) deleteTree(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID, deleteAll bool) error {
+	if !deleteAll && len(ids) == 0 {
+		return nil
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	where := `account_id = $1`
+	args := []interface{}{accountID}
+	if !deleteAll {
+		where += ` AND id = ANY($2)`
+		args = append(args, ids)
+	}
+
+	contactSQL := fmt.Sprintf(`SELECT id, jid FROM contacts WHERE %s`, where)
+	rows, err := tx.Query(ctx, contactSQL, args...)
+	if err != nil {
+		return err
+	}
+	contactIDs := make([]uuid.UUID, 0, len(ids))
+	jids := make([]string, 0, len(ids))
+	for rows.Next() {
+		var id uuid.UUID
+		var jid string
+		if err := rows.Scan(&id, &jid); err != nil {
+			rows.Close()
+			return err
+		}
+		contactIDs = append(contactIDs, id)
+		if strings.TrimSpace(jid) != "" {
+			jids = append(jids, jid)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(contactIDs) == 0 {
+		if !deleteAll && len(ids) == 1 {
+			return pgx.ErrNoRows
+		}
+		return tx.Commit(ctx)
+	}
+
+	chatRows, err := tx.Query(ctx, `
+		SELECT id
+		FROM chats
+		WHERE account_id = $1
+		  AND (contact_id = ANY($2) OR jid = ANY($3))
+	`, accountID, contactIDs, jids)
+	if err != nil {
+		return err
+	}
+	chatIDs := []uuid.UUID{}
+	for chatRows.Next() {
+		var id uuid.UUID
+		if err := chatRows.Scan(&id); err != nil {
+			chatRows.Close()
+			return err
+		}
+		chatIDs = append(chatIDs, id)
+	}
+	if err := chatRows.Err(); err != nil {
+		chatRows.Close()
+		return err
+	}
+	chatRows.Close()
+
+	if len(chatIDs) > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE account_id = $1 AND chat_id = ANY($2)`, accountID, chatIDs); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM chats WHERE account_id = $1 AND id = ANY($2)`, accountID, chatIDs); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM leads WHERE account_id = $1 AND contact_id = ANY($2)`, accountID, contactIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM contacts WHERE account_id = $1 AND id = ANY($2)`, accountID, contactIDs); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *ContactRepository) FindDuplicates(ctx context.Context, accountID uuid.UUID) ([][]*domain.Contact, error) {
@@ -2084,13 +2176,19 @@ func (r *LeadRepository) GetByContactID(ctx context.Context, contactID uuid.UUID
 	return lead, err
 }
 
-func (r *LeadRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM leads WHERE id = $1`, id)
-	return err
+func (r *LeadRepository) Delete(ctx context.Context, accountID, id uuid.UUID) error {
+	cmd, err := r.db.Exec(ctx, `DELETE FROM leads WHERE account_id = $1 AND id = $2`, accountID, id)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
-func (r *LeadRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM leads WHERE id = ANY($1)`, ids)
+func (r *LeadRepository) DeleteBatch(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM leads WHERE account_id = $1 AND id = ANY($2)`, accountID, ids)
 	return err
 }
 
@@ -2299,6 +2397,57 @@ func (r *PipelineRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+func (r *PipelineRepository) DeleteForAccount(ctx context.Context, id, accountID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		UPDATE accounts
+		SET default_incoming_stage_id = NULL, updated_at = NOW()
+		WHERE id = $2
+		  AND default_incoming_stage_id IN (
+			SELECT id FROM pipeline_stages WHERE pipeline_id = $1
+		  )
+	`, id, accountID)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE leads
+		SET pipeline_id = NULL, stage_id = NULL, updated_at = NOW()
+		WHERE pipeline_id = $1 AND account_id = $2
+	`, id, accountID)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		DELETE FROM pipeline_stages
+		WHERE pipeline_id = $1
+		  AND EXISTS (
+			SELECT 1 FROM pipelines
+			WHERE id = $1 AND account_id = $2
+		  )
+	`, id, accountID)
+	if err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM pipelines WHERE id = $1 AND account_id = $2`, id, accountID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (r *PipelineRepository) CreateStage(ctx context.Context, stage *domain.PipelineStage) error {
 	stage.ID = uuid.New()
 	stage.CreatedAt = time.Now()
@@ -2466,6 +2615,14 @@ type TagRepository struct {
 	db *pgxpool.Pool
 }
 
+func normalizeRepositoryTagName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
 func (r *TagRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Tag, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, name, color, created_at, updated_at
@@ -2598,6 +2755,163 @@ func (r *TagRepository) SyncLeadTagsByNames(ctx context.Context, accountID, lead
 		_, _ = r.db.Exec(ctx, `INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, *contactID, tagID)
 	}
 	return nil
+}
+
+// SyncKommoStatusTagForContact keeps exactly one Kommo-status tag from the
+// provided closed set on a contact, creating the canonical tag if needed.
+func (r *TagRepository) SyncKommoStatusTagForContact(ctx context.Context, accountID, contactID uuid.UUID, statusTagName string, statusTagNames []string) error {
+	statusTagName = strings.TrimSpace(statusTagName)
+	if statusTagName == "" || len(statusTagNames) == 0 {
+		return nil
+	}
+	normalizedStatusNames := make([]string, 0, len(statusTagNames))
+	seen := map[string]bool{}
+	for _, name := range statusTagNames {
+		normalized := normalizeRepositoryTagName(name)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		normalizedStatusNames = append(normalizedStatusNames, normalized)
+	}
+	if len(normalizedStatusNames) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var tagID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		INSERT INTO tags (id, account_id, name, color, created_at, updated_at)
+		VALUES ($1, $2, $3, '#6366f1', NOW(), NOW())
+		ON CONFLICT (account_id, name) DO UPDATE SET name = EXCLUDED.name
+		RETURNING id
+	`, uuid.New(), accountID, statusTagName).Scan(&tagID)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		DELETE FROM contact_tags ct
+		USING tags t
+		WHERE ct.tag_id = t.id
+		  AND ct.contact_id = $1
+		  AND t.account_id = $2
+		  AND lower(trim(regexp_replace(t.name, '\s+', ' ', 'g'))) = ANY($3)
+	`, contactID, accountID, normalizedStatusNames)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO contact_tags (contact_id, tag_id)
+		VALUES ($1, $2)
+		ON CONFLICT DO NOTHING
+	`, contactID, tagID)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// RemoveKommoStatusTagsForContact removes only tags from the controlled Kommo
+// status family for one contact.
+func (r *TagRepository) RemoveKommoStatusTagsForContact(ctx context.Context, accountID, contactID uuid.UUID, statusTagNames []string) error {
+	if len(statusTagNames) == 0 {
+		return nil
+	}
+	normalizedStatusNames := make([]string, 0, len(statusTagNames))
+	seen := map[string]bool{}
+	for _, name := range statusTagNames {
+		normalized := normalizeRepositoryTagName(name)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		normalizedStatusNames = append(normalizedStatusNames, normalized)
+	}
+	if len(normalizedStatusNames) == 0 {
+		return nil
+	}
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM contact_tags ct
+		USING tags t
+		WHERE ct.tag_id = t.id
+		  AND ct.contact_id = $1
+		  AND t.account_id = $2
+		  AND lower(trim(regexp_replace(t.name, '\s+', ' ', 'g'))) = ANY($3)
+	`, contactID, accountID, normalizedStatusNames)
+	return err
+}
+
+// SyncKommoFechaTagForLead keeps the date-like tag generated from Kommo's
+// "✅ Fecha" field in sync. An empty fechaTag removes the previous Kommo date tag.
+func (r *TagRepository) SyncKommoFechaTagForLead(ctx context.Context, accountID, leadID uuid.UUID, fechaTag string) (bool, error) {
+	fechaTag = strings.TrimSpace(fechaTag)
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var contactID *uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT contact_id
+		FROM leads
+		WHERE id = $1 AND account_id = $2
+	`, leadID, accountID).Scan(&contactID)
+	if err == pgx.ErrNoRows || contactID == nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	dateTagPattern := `^[0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4}$`
+	cmd, err := tx.Exec(ctx, `
+		DELETE FROM contact_tags ct
+		USING tags t
+		WHERE ct.tag_id = t.id
+		  AND ct.contact_id = $1
+		  AND t.account_id = $2
+		  AND trim(t.name) ~ $3
+	`, *contactID, accountID, dateTagPattern)
+	if err != nil {
+		return false, err
+	}
+	changed := cmd.RowsAffected() > 0
+
+	if fechaTag != "" {
+		var tagID uuid.UUID
+		err = tx.QueryRow(ctx, `
+			INSERT INTO tags (id, account_id, name, color, created_at, updated_at)
+			VALUES ($1, $2, $3, '#6366f1', NOW(), NOW())
+			ON CONFLICT (account_id, name) DO UPDATE SET name = EXCLUDED.name
+			RETURNING id
+		`, uuid.New(), accountID, fechaTag).Scan(&tagID)
+		if err != nil {
+			return false, err
+		}
+		cmd, err = tx.Exec(ctx, `
+			INSERT INTO contact_tags (contact_id, tag_id)
+			VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, *contactID, tagID)
+		if err != nil {
+			return false, err
+		}
+		changed = changed || cmd.RowsAffected() > 0
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
 // SyncContactTagsByNames replaces all contact_tags for a contact with the given tag names.
@@ -3867,6 +4181,18 @@ type EventPipelineRepository struct {
 	db *pgxpool.Pool
 }
 
+type EventStageLayoutStage struct {
+	ID       *uuid.UUID
+	Name     string
+	Color    string
+	Position int
+}
+
+type EventStageLayoutDeletion struct {
+	ID            uuid.UUID
+	MoveToStageID uuid.UUID
+}
+
 var defaultEventPipelineStages = []struct {
 	name  string
 	color string
@@ -4064,6 +4390,304 @@ func (r *EventPipelineRepository) Update(ctx context.Context, p *domain.EventPip
 func (r *EventPipelineRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM event_pipelines WHERE id = $1`, id)
 	return err
+}
+
+func (r *EventPipelineRepository) EnsureDedicatedForEvent(ctx context.Context, eventID, accountID, pipelineID uuid.UUID, eventName string) (uuid.UUID, map[uuid.UUID]uuid.UUID, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var pipelineName string
+	var description *string
+	var isDefault bool
+	err = tx.QueryRow(ctx, `
+		SELECT name, description, is_default
+		FROM event_pipelines
+		WHERE id = $1 AND account_id = $2
+	`, pipelineID, accountID).Scan(&pipelineName, &description, &isDefault)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+
+	var usageCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM events
+		WHERE account_id = $1 AND pipeline_id = $2
+	`, accountID, pipelineID).Scan(&usageCount); err != nil {
+		return uuid.Nil, nil, err
+	}
+
+	if !isDefault && usageCount <= 1 {
+		return pipelineID, map[uuid.UUID]uuid.UUID{}, tx.Commit(ctx)
+	}
+
+	newPipelineID := uuid.New()
+	localDesc := "Pipeline local para " + eventName
+	if description != nil && *description != "" {
+		localDesc = *description
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO event_pipelines (id, account_id, name, description, is_default, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, FALSE, NOW(), NOW())
+		RETURNING id
+	`, newPipelineID, accountID, pipelineName+" - "+eventName, localDesc).Scan(&newPipelineID); err != nil {
+		return uuid.Nil, nil, err
+	}
+
+	stageRows, err := tx.Query(ctx, `
+		SELECT id, name, color, position
+		FROM event_pipeline_stages
+		WHERE pipeline_id = $1
+		ORDER BY position
+	`, pipelineID)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	type sourceStage struct {
+		id       uuid.UUID
+		name     string
+		color    string
+		position int
+	}
+	var sourceStages []sourceStage
+	for stageRows.Next() {
+		var stage sourceStage
+		if err := stageRows.Scan(&stage.id, &stage.name, &stage.color, &stage.position); err != nil {
+			stageRows.Close()
+			return uuid.Nil, nil, err
+		}
+		sourceStages = append(sourceStages, stage)
+	}
+	stageRows.Close()
+	if err := stageRows.Err(); err != nil {
+		return uuid.Nil, nil, err
+	}
+
+	stageMap := make(map[uuid.UUID]uuid.UUID)
+	for _, stage := range sourceStages {
+		newStageID := uuid.New()
+		stageMap[stage.id] = newStageID
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO event_pipeline_stages (id, pipeline_id, name, color, position, created_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
+		`, newStageID, newPipelineID, stage.name, stage.color, stage.position); err != nil {
+			return uuid.Nil, nil, err
+		}
+	}
+
+	if len(stageMap) == 0 {
+		for i, stage := range defaultEventPipelineStages {
+			newStageID := uuid.New()
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO event_pipeline_stages (id, pipeline_id, name, color, position, created_at)
+				VALUES ($1, $2, $3, $4, $5, NOW())
+			`, newStageID, newPipelineID, stage.name, stage.color, i); err != nil {
+				return uuid.Nil, nil, err
+			}
+		}
+	}
+
+	for oldID, newID := range stageMap {
+		if _, err := tx.Exec(ctx, `
+			UPDATE event_participants
+			SET stage_id = $1, updated_at = NOW()
+			WHERE event_id = $2 AND stage_id = $3
+		`, newID, eventID, oldID); err != nil {
+			return uuid.Nil, nil, err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE events
+		SET pipeline_id = $1, updated_at = NOW()
+		WHERE id = $2 AND account_id = $3
+	`, newPipelineID, eventID, accountID); err != nil {
+		return uuid.Nil, nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, nil, err
+	}
+	return newPipelineID, stageMap, nil
+}
+
+func (r *EventPipelineRepository) CreateStage(ctx context.Context, stage *domain.EventPipelineStage) error {
+	stage.ID = uuid.New()
+	stage.CreatedAt = time.Now()
+	var maxPos *int
+	_ = r.db.QueryRow(ctx, `SELECT MAX(position) FROM event_pipeline_stages WHERE pipeline_id = $1`, stage.PipelineID).Scan(&maxPos)
+	if maxPos != nil {
+		stage.Position = *maxPos + 1
+	} else {
+		stage.Position = 0
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO event_pipeline_stages (id, pipeline_id, name, color, position, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, stage.ID, stage.PipelineID, stage.Name, stage.Color, stage.Position, stage.CreatedAt)
+	return err
+}
+
+func (r *EventPipelineRepository) UpdateStage(ctx context.Context, pipelineID, stageID uuid.UUID, name, color *string) (*domain.EventPipelineStage, error) {
+	stage := &domain.EventPipelineStage{}
+	err := r.db.QueryRow(ctx, `
+		UPDATE event_pipeline_stages
+		SET name = COALESCE($1, name), color = COALESCE($2, color)
+		WHERE id = $3 AND pipeline_id = $4
+		RETURNING id, pipeline_id, name, color, position, created_at
+	`, name, color, stageID, pipelineID).Scan(&stage.ID, &stage.PipelineID, &stage.Name, &stage.Color, &stage.Position, &stage.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return stage, nil
+}
+
+func (r *EventPipelineRepository) DeleteStageForEvent(ctx context.Context, eventID, pipelineID, stageID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE event_participants
+		SET stage_id = NULL, updated_at = NOW()
+		WHERE event_id = $1 AND stage_id = $2
+	`, eventID, stageID); err != nil {
+		return err
+	}
+	cmd, err := tx.Exec(ctx, `
+		DELETE FROM event_pipeline_stages
+		WHERE id = $1 AND pipeline_id = $2
+	`, stageID, pipelineID)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *EventPipelineRepository) SaveStageLayoutForEvent(ctx context.Context, eventID, pipelineID uuid.UUID, stages []EventStageLayoutStage, deletions []EventStageLayoutDeletion) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	deleteSet := make(map[uuid.UUID]struct{}, len(deletions))
+	for _, deletion := range deletions {
+		deleteSet[deletion.ID] = struct{}{}
+		var exists bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM event_pipeline_stages
+				WHERE id = $1 AND pipeline_id = $2
+			)
+		`, deletion.ID, pipelineID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return pgx.ErrNoRows
+		}
+	}
+
+	for _, deletion := range deletions {
+		if deletion.MoveToStageID == uuid.Nil {
+			return fmt.Errorf("move destination is required")
+		}
+		if deletion.MoveToStageID == deletion.ID {
+			return fmt.Errorf("move destination cannot be the deleted stage")
+		}
+		if _, willDelete := deleteSet[deletion.MoveToStageID]; willDelete {
+			return fmt.Errorf("move destination cannot be another deleted stage")
+		}
+		var destinationExists bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM event_pipeline_stages
+				WHERE id = $1 AND pipeline_id = $2
+			)
+		`, deletion.MoveToStageID, pipelineID).Scan(&destinationExists); err != nil {
+			return err
+		}
+		if !destinationExists {
+			return fmt.Errorf("move destination stage not found")
+		}
+	}
+
+	seenStageIDs := make(map[uuid.UUID]struct{})
+	for i, stage := range stages {
+		name := strings.TrimSpace(stage.Name)
+		if name == "" {
+			return fmt.Errorf("stage name is required")
+		}
+		color := strings.TrimSpace(stage.Color)
+		if color == "" {
+			color = "#6366f1"
+		}
+		position := stage.Position
+		if position < 0 {
+			position = i
+		}
+
+		if stage.ID == nil || *stage.ID == uuid.Nil {
+			newID := uuid.New()
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO event_pipeline_stages (id, pipeline_id, name, color, position, created_at)
+				VALUES ($1, $2, $3, $4, $5, NOW())
+			`, newID, pipelineID, name, color, position); err != nil {
+				return err
+			}
+			seenStageIDs[newID] = struct{}{}
+			continue
+		}
+
+		if _, willDelete := deleteSet[*stage.ID]; willDelete {
+			return fmt.Errorf("deleted stage cannot remain in layout")
+		}
+		if _, seen := seenStageIDs[*stage.ID]; seen {
+			return fmt.Errorf("duplicate stage in layout")
+		}
+		cmd, err := tx.Exec(ctx, `
+			UPDATE event_pipeline_stages
+			SET name = $1, color = $2, position = $3
+			WHERE id = $4 AND pipeline_id = $5
+		`, name, color, position, *stage.ID, pipelineID)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return pgx.ErrNoRows
+		}
+		seenStageIDs[*stage.ID] = struct{}{}
+	}
+
+	for _, deletion := range deletions {
+		if _, err := tx.Exec(ctx, `
+			UPDATE event_participants
+			SET stage_id = $1, updated_at = NOW()
+			WHERE event_id = $2 AND stage_id = $3
+		`, deletion.MoveToStageID, eventID, deletion.ID); err != nil {
+			return err
+		}
+		cmd, err := tx.Exec(ctx, `
+			DELETE FROM event_pipeline_stages
+			WHERE id = $1 AND pipeline_id = $2
+		`, deletion.ID, pipelineID)
+		if err != nil {
+			return err
+		}
+		if cmd.RowsAffected() == 0 {
+			return pgx.ErrNoRows
+		}
+	}
+
+	return tx.Commit(ctx)
 }
 
 // ReplaceStages deletes all stages for a pipeline and inserts new ones

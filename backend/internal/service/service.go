@@ -1019,12 +1019,12 @@ func (s *ChatService) EditMessage(ctx context.Context, deviceID uuid.UUID, chatJ
 	return s.pool.EditMessage(ctx, deviceID, chatJID, messageID, newBody)
 }
 
-func (s *ChatService) Delete(ctx context.Context, chatID uuid.UUID) error {
-	return s.repos.Chat.Delete(ctx, chatID)
+func (s *ChatService) Delete(ctx context.Context, accountID, chatID uuid.UUID) error {
+	return s.repos.Chat.Delete(ctx, accountID, chatID)
 }
 
-func (s *ChatService) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
-	return s.repos.Chat.DeleteBatch(ctx, ids)
+func (s *ChatService) DeleteBatch(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID) error {
+	return s.repos.Chat.DeleteBatch(ctx, accountID, ids)
 }
 
 func (s *ChatService) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
@@ -1096,12 +1096,12 @@ func (s *ContactService) SyncToLead(ctx context.Context, contact *domain.Contact
 	return s.repos.Contact.SyncToLead(ctx, contact)
 }
 
-func (s *ContactService) Delete(ctx context.Context, id uuid.UUID) error {
-	return s.repos.Contact.Delete(ctx, id)
+func (s *ContactService) Delete(ctx context.Context, accountID, id uuid.UUID) error {
+	return s.repos.Contact.Delete(ctx, accountID, id)
 }
 
-func (s *ContactService) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
-	return s.repos.Contact.DeleteBatch(ctx, ids)
+func (s *ContactService) DeleteBatch(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID) error {
+	return s.repos.Contact.DeleteBatch(ctx, accountID, ids)
 }
 
 func (s *ContactService) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
@@ -1186,12 +1186,12 @@ func (s *LeadService) GetByJID(ctx context.Context, accountID uuid.UUID, jid str
 	return s.repos.Lead.GetByJID(ctx, accountID, jid)
 }
 
-func (s *LeadService) Delete(ctx context.Context, id uuid.UUID) error {
-	return s.repos.Lead.Delete(ctx, id)
+func (s *LeadService) Delete(ctx context.Context, accountID, id uuid.UUID) error {
+	return s.repos.Lead.Delete(ctx, accountID, id)
 }
 
-func (s *LeadService) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
-	return s.repos.Lead.DeleteBatch(ctx, ids)
+func (s *LeadService) DeleteBatch(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID) error {
+	return s.repos.Lead.DeleteBatch(ctx, accountID, ids)
 }
 
 func (s *LeadService) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
@@ -1287,6 +1287,10 @@ func (s *PipelineService) Update(ctx context.Context, pipeline *domain.Pipeline)
 
 func (s *PipelineService) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repos.Pipeline.Delete(ctx, id)
+}
+
+func (s *PipelineService) DeleteForAccount(ctx context.Context, id, accountID uuid.UUID) error {
+	return s.repos.Pipeline.DeleteForAccount(ctx, id, accountID)
 }
 
 func (s *PipelineService) CreateStage(ctx context.Context, stage *domain.PipelineStage) error {
@@ -2022,6 +2026,26 @@ func (s *EventService) UpdatePipeline(ctx context.Context, p *domain.EventPipeli
 
 func (s *EventService) DeletePipeline(ctx context.Context, id uuid.UUID) error {
 	return s.repos.EventPipeline.Delete(ctx, id)
+}
+
+func (s *EventService) EnsureDedicatedPipelineForEvent(ctx context.Context, eventID, accountID, pipelineID uuid.UUID, eventName string) (uuid.UUID, map[uuid.UUID]uuid.UUID, error) {
+	return s.repos.EventPipeline.EnsureDedicatedForEvent(ctx, eventID, accountID, pipelineID, eventName)
+}
+
+func (s *EventService) CreatePipelineStage(ctx context.Context, stage *domain.EventPipelineStage) error {
+	return s.repos.EventPipeline.CreateStage(ctx, stage)
+}
+
+func (s *EventService) UpdatePipelineStage(ctx context.Context, pipelineID, stageID uuid.UUID, name, color *string) (*domain.EventPipelineStage, error) {
+	return s.repos.EventPipeline.UpdateStage(ctx, pipelineID, stageID, name, color)
+}
+
+func (s *EventService) DeletePipelineStageForEvent(ctx context.Context, eventID, pipelineID, stageID uuid.UUID) error {
+	return s.repos.EventPipeline.DeleteStageForEvent(ctx, eventID, pipelineID, stageID)
+}
+
+func (s *EventService) SavePipelineStageLayoutForEvent(ctx context.Context, eventID, pipelineID uuid.UUID, stages []repository.EventStageLayoutStage, deletions []repository.EventStageLayoutDeletion) error {
+	return s.repos.EventPipeline.SaveStageLayoutForEvent(ctx, eventID, pipelineID, stages, deletions)
 }
 
 func (s *EventService) ReplaceStages(ctx context.Context, pipelineID uuid.UUID, stages []*domain.EventPipelineStage) error {

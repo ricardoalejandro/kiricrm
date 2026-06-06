@@ -479,6 +479,11 @@ export default function LeadsPage() {
   const listOffsetRef = useRef(0)
   const filterDropdownRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
+  const activePipelineIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    activePipelineIdRef.current = activePipeline?.id || null
+  }, [activePipeline?.id])
 
   // Ctrl+drag kanban panning
   useKanbanPan(kanbanRef, topScrollRef)
@@ -499,15 +504,21 @@ export default function LeadsPage() {
     }
   }, [filterDropdownRef])
 
-  const fetchPipelines = useCallback(async () => {
+  const fetchPipelines = useCallback(async (preferredPipelineId?: string | null) => {
     const token = localStorage.getItem('token')
     try {
       const pipelinesRes = await fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } })
       const data = await pipelinesRes.json()
       if (data.success && data.pipelines && data.pipelines.length > 0) {
         setPipelines(data.pipelines)
+        const keepPipelineId = preferredPipelineId ?? activePipelineIdRef.current
+        if (keepPipelineId === '__no_pipeline__') {
+          setActivePipeline({ id: '__no_pipeline__', name: 'Sin pipeline', is_default: false, stages: [] })
+          return
+        }
+        const currentP = keepPipelineId ? data.pipelines.find((p: Pipeline) => p.id === keepPipelineId) : null
         const defaultP = data.pipelines.find((p: Pipeline) => p.is_default) || data.pipelines[0]
-        if (defaultP) setActivePipeline(defaultP)
+        if (currentP || defaultP) setActivePipeline(currentP || defaultP)
       } else {
         setPipelines([])
       }
@@ -1053,8 +1064,21 @@ export default function LeadsPage() {
 
   const handleReorderStages = async (fromIdx: number, toIdx: number) => {
     if (!activePipeline || fromIdx === toIdx) return
-    const reordered = [...stages]
+    const reordered = [...allStages]
+    if (
+      fromIdx < 0 ||
+      toIdx < 0 ||
+      fromIdx >= reordered.length ||
+      toIdx >= reordered.length
+    ) {
+      console.warn('Ignoring invalid stage reorder', { fromIdx, toIdx, total: reordered.length })
+      return
+    }
     const [moved] = reordered.splice(fromIdx, 1)
+    if (!moved) {
+      console.warn('Ignoring stage reorder without source stage', { fromIdx, toIdx, total: reordered.length })
+      return
+    }
     reordered.splice(toIdx, 0, moved)
     // Optimistically update
     const updated = { ...activePipeline, stages: reordered.map((s, i) => ({ ...s, position: i })) }
@@ -1063,11 +1087,15 @@ export default function LeadsPage() {
     // API call
     const token = localStorage.getItem('token')
     try {
-      await fetch(`/api/pipelines/${activePipeline.id}/stages/reorder`, {
+      const res = await fetch(`/api/pipelines/${activePipeline.id}/stages/reorder`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ stage_ids: reordered.map(s => s.id) }),
       })
+      if (!res.ok) {
+        const data = await res.json().catch(() => null)
+        throw new Error(data?.error || 'No se pudo reordenar las etapas')
+      }
     } catch (err) {
       console.error('Failed to reorder stages:', err)
       fetchPipelines()
@@ -1142,7 +1170,7 @@ export default function LeadsPage() {
   }
 
   const handleDeleteLead = async (leadId: string) => {
-    if (!confirm('¿Estás seguro de eliminar este lead?')) return
+    if (!confirm('¿Eliminar este lead? No se eliminará el contacto ni el chat asociado.')) return
     const token = localStorage.getItem('token')
     try {
       const res = await fetch(`/api/leads/${leadId}`, {
@@ -1160,7 +1188,7 @@ export default function LeadsPage() {
 
   const handleDeleteSelected = async () => {
     if (selectedIds.size === 0) return
-    if (!confirm(`¿Estás seguro de eliminar ${selectedIds.size} lead(s)?`)) return
+    if (!confirm(`¿Eliminar ${selectedIds.size} lead(s)? No se eliminarán contactos ni chats asociados.`)) return
     const token = localStorage.getItem('token')
     setDeleting(true)
     try {
@@ -2986,7 +3014,7 @@ export default function LeadsPage() {
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
                   >
                     <Upload className="w-4 h-4 text-slate-400" />
-                    Importar CSV
+                    Importar Excel
                   </button>
                   <button
                     onClick={() => { setShowExportModal(true); setShowMoreMenu(false) }}
@@ -3843,7 +3871,7 @@ export default function LeadsPage() {
       <ImportCSVModal
         open={showImportModal}
         onClose={() => setShowImportModal(false)}
-        onSuccess={() => { fetchLeadsPaginated(); fetchPipelines() }}
+        onSuccess={() => { fetchLeadsPaginated(); fetchPipelines(activePipelineIdRef.current) }}
         defaultType="leads"
       />
 

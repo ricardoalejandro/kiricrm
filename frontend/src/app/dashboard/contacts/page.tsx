@@ -707,7 +707,7 @@ export default function ContactsPage() {
 
 
   const handleDeleteContact = async (contactId: string) => {
-    if (!confirm('¿Estás seguro de eliminar este contacto?')) return
+    if (!confirm('¿Eliminar este contacto? También se eliminarán sus leads, chats y mensajes. Esta acción no se puede deshacer.')) return
     try {
       const res = await fetch(`/api/contacts/${contactId}`, {
         method: 'DELETE',
@@ -726,7 +726,7 @@ export default function ContactsPage() {
 
   const handleDeleteSelected = async () => {
     if (selectedIds.size === 0) return
-    if (!confirm(`¿Eliminar ${selectedIds.size} contacto(s)?`)) return
+    if (!confirm(`¿Eliminar ${selectedIds.size} contacto(s)? También se eliminarán sus leads, chats y mensajes. Esta acción no se puede deshacer.`)) return
     try {
       const res = await fetch('/api/contacts/batch', {
         method: 'DELETE',
@@ -1772,7 +1772,7 @@ export default function ContactsPage() {
                       className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
                     >
                       <Upload className="w-4 h-4 text-slate-400" />
-                      Importar CSV
+                      Importar Excel
                     </button>
                     <div className="my-1 border-t border-slate-100" />
                     <button

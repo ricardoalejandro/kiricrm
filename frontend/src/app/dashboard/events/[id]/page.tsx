@@ -51,6 +51,8 @@ const PARTICIPANT_DATE_FIELDS = [
   { key: 'attended_at', label: 'Asistencia' },
 ] as const
 
+const STAGE_COLOR_OPTIONS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#6366f1', '#14b8a6', '#64748b']
+
 function resolveParticipantDatePreset(preset: string, customFrom?: string, customTo?: string): { from: string; to: string } | null {
   const now = new Date()
   switch (preset) {
@@ -97,6 +99,25 @@ interface Participant {
 interface PipelineStage {
   id: string; pipeline_id: string; name: string; color: string; position: number
   participant_count?: number
+}
+
+interface DraftStage {
+  id: string
+  pipeline_id: string
+  name: string
+  color: string
+  position: number
+  total_count: number
+  isNew?: boolean
+  clientId?: string
+  isDeleted?: boolean
+}
+
+interface DraftStageDeletion {
+  stageId: string
+  stageName: string
+  totalCount: number
+  moveToStageId: string
 }
 
 interface Observation {
@@ -170,6 +191,7 @@ interface ParticipantCardProps {
   isDetailActive: boolean
   isDragged: boolean
   selectionMode: boolean
+  canDrag?: boolean
   onToggleSelection: (id: string) => void
   onOpenDetail: (p: Participant) => void
   onDelete: (id: string) => void
@@ -179,18 +201,19 @@ interface ParticipantCardProps {
 
 const ParticipantCard = memo(function ParticipantCard({
   participant: p, isSelected, isDetailActive, isDragged, selectionMode,
+  canDrag = true,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd,
 }: ParticipantCardProps) {
   return (
     <div
-      draggable={!selectionMode}
+      draggable={!selectionMode && canDrag}
       onDragStart={(e) => onDragStart(e, p.id)}
       onDragEnd={onDragEnd}
       className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
         isSelected ? 'border-emerald-500 ring-2 ring-emerald-100'
         : isDetailActive ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
         : 'border-slate-100'
-      } ${isDragged ? 'opacity-50' : ''} ${!selectionMode ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      } ${isDragged ? 'opacity-50' : ''} ${!selectionMode && canDrag ? 'cursor-grab active:cursor-grabbing' : ''}`}
       onClick={() => selectionMode ? onToggleSelection(p.id) : onOpenDetail(p)}
     >
       <div className="flex items-start justify-between group">
@@ -259,13 +282,22 @@ interface VirtualColumnProps {
   onDragOver: (e: React.DragEvent, stageId: string) => void; onDragLeave: (e: React.DragEvent) => void
   onDrop: (e: React.DragEvent, stageId: string) => void
   onRenameStage?: (stageId: string, newName: string) => void
+  onColorStage?: (stageId: string, color: string) => void
+  onDeleteStage?: (stageId: string, stageName: string, totalCount: number) => void
+  canManageStage?: boolean
+  canDragParticipants?: boolean
+  stageEditMode?: boolean
+  onStageDragStart?: (stageId: string) => void
+  onStageDrop?: (stageId: string) => void
+  isStageDragging?: boolean
 }
 
 const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   column, totalCount, hasMore, loadingMore, onLoadMore,
   selectedIds, detailParticipantId, draggedId, dragOverColumn, selectionMode,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
-  onRenameStage,
+  onRenameStage, onColorStage, onDeleteStage, canManageStage = true, canDragParticipants = true,
+  stageEditMode = false, onStageDragStart, onStageDrop, isStageDragging = false,
 }: VirtualColumnProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const [editingName, setEditingName] = useState(false)
@@ -290,13 +322,37 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
     return () => el.removeEventListener('scroll', handleScroll)
   }, [hasMore, loadingMore, onLoadMore])
 
+  useEffect(() => {
+    setEditName(column.name)
+  }, [column.name])
+
   return (
-    <div className="w-[272px] flex-shrink-0 flex flex-col" style={{ maxHeight: '100%' }}>
+    <div
+      className={`w-[272px] flex-shrink-0 flex flex-col transition ${isStageDragging ? 'opacity-60' : ''}`}
+      style={{ maxHeight: '100%' }}
+      draggable={stageEditMode && Boolean(onStageDragStart)}
+      onDragStart={(e) => {
+        if (!stageEditMode || !onStageDragStart) return
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('application/x-event-stage', column.id)
+        onStageDragStart(column.id)
+      }}
+      onDragOver={(e) => {
+        if (!stageEditMode || !onStageDrop) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+      }}
+      onDrop={(e) => {
+        if (!stageEditMode || !onStageDrop) return
+        e.preventDefault()
+        onStageDrop(column.id)
+      }}
+    >
       <div
         className="px-3 py-2.5 rounded-t-xl sticky top-0 z-10 shrink-0"
         style={{ background: `linear-gradient(135deg, ${column.color}30, ${column.color}18)`, borderBottom: `3px solid ${column.color}`, boxShadow: `0 2px 8px ${column.color}20` }}
       >
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           {editingName ? (
             <input
               ref={editInputRef}
@@ -308,29 +364,55 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
               autoFocus
             />
           ) : (
-            <span
-              className="text-sm font-bold tracking-wide uppercase text-slate-800 cursor-pointer hover:text-emerald-700 transition-colors"
-              onDoubleClick={() => { setEditName(column.name); setEditingName(true); setTimeout(() => editInputRef.current?.select(), 50) }}
-              title="Doble clic para editar"
-            >{column.name}</span>
+            <div className="flex items-center gap-1.5 min-w-0">
+              {stageEditMode && <GripVertical className="w-3.5 h-3.5 text-slate-400 shrink-0 cursor-grab" />}
+              <span
+                className={`text-sm font-bold tracking-wide uppercase text-slate-800 truncate ${canManageStage ? 'cursor-pointer hover:text-emerald-700 transition-colors' : ''}`}
+                onDoubleClick={() => { if (canManageStage) { setEditName(column.name); setEditingName(true); setTimeout(() => editInputRef.current?.select(), 50) } }}
+                title={canManageStage ? 'Doble clic para editar' : undefined}
+              >{column.name}</span>
+            </div>
           )}
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             {column.participants.length < totalCount && (
               <span className="text-[10px] text-slate-500 font-medium tabular-nums">{column.participants.length}/</span>
             )}
             <span className="text-xs px-2 py-0.5 rounded-full font-bold text-white tabular-nums" style={{ backgroundColor: column.color }}>{totalCount}</span>
+            {canManageStage && onDeleteStage && (
+              <button
+                onClick={() => onDeleteStage(column.id, column.name, totalCount)}
+                className="p-1 rounded-md text-slate-400 hover:text-red-600 hover:bg-white/70 transition-colors"
+                title="Eliminar etapa"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
       </div>
+      {stageEditMode && canManageStage && (
+        <div className="px-3 py-2 bg-white border-x border-slate-100 flex items-center gap-1.5">
+          {STAGE_COLOR_OPTIONS.map(color => (
+            <button
+              key={color}
+              type="button"
+              onClick={() => onColorStage?.(column.id, color)}
+              className={`w-5 h-5 rounded-full border transition ${column.color === color ? 'border-slate-900 scale-110' : 'border-white hover:scale-105'}`}
+              style={{ backgroundColor: color }}
+              title={color}
+            />
+          ))}
+        </div>
+      )}
       <div
         ref={parentRef}
         className={`bg-slate-50/80 p-2 flex-1 overflow-y-auto kanban-col-scroll transition-colors ${
-          dragOverColumn === column.id ? 'bg-emerald-50 ring-2 ring-emerald-300 ring-inset' : ''
+          canDragParticipants && dragOverColumn === column.id ? 'bg-emerald-50 ring-2 ring-emerald-300 ring-inset' : ''
         }`}
         style={{ minHeight: 200 }}
-        onDragOver={(e) => onDragOver(e, column.id)}
-        onDragLeave={onDragLeave}
-        onDrop={(e) => onDrop(e, column.id)}
+        onDragOver={canDragParticipants ? (e) => onDragOver(e, column.id) : undefined}
+        onDragLeave={canDragParticipants ? onDragLeave : undefined}
+        onDrop={canDragParticipants ? (e) => onDrop(e, column.id) : undefined}
       >
         <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
           {virtualizer.getVirtualItems().map((vi) => {
@@ -349,6 +431,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
                     onDelete={onDelete}
                     onDragStart={onDragStart}
                     onDragEnd={onDragEnd}
+                    canDrag={canDragParticipants}
                   />
                 </div>
               </div>
@@ -478,6 +561,17 @@ export default function EventDetailPage() {
   // More menu
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
+
+  // Stage management
+  const [showStageModal, setShowStageModal] = useState(false)
+  const [newStageName, setNewStageName] = useState('')
+  const [newStageColor, setNewStageColor] = useState('#3b82f6')
+  const [stageEditMode, setStageEditMode] = useState(false)
+  const [draftStages, setDraftStages] = useState<DraftStage[]>([])
+  const [draftDeletedStages, setDraftDeletedStages] = useState<DraftStageDeletion[]>([])
+  const [stageLayoutSaving, setStageLayoutSaving] = useState(false)
+  const [stageLayoutError, setStageLayoutError] = useState('')
+  const [draggedStageId, setDraggedStageId] = useState<string | null>(null)
 
   // Google Sync
   const [showGoogleSyncModal, setShowGoogleSyncModal] = useState(false)
@@ -797,6 +891,55 @@ export default function EventDetailPage() {
     [stageData, unassignedData]
   )
 
+  const activeDraftStages = useMemo(() => (
+    draftStages
+      .filter(stage => !stage.isDeleted)
+      .sort((a, b) => a.position - b.position)
+  ), [draftStages])
+
+  const renderedStageData = useMemo(() => {
+    if (!stageEditMode) return stageData
+    const currentById = new Map(stageData.map(stage => [stage.id, stage]))
+    return activeDraftStages.map(stage => {
+      const current = currentById.get(stage.id)
+      return {
+        id: stage.id,
+        pipeline_id: stage.pipeline_id,
+        name: stage.name,
+        color: stage.color,
+        position: stage.position,
+        total_count: current?.total_count ?? stage.total_count,
+        participants: current?.participants || [],
+        has_more: current?.has_more || false,
+      }
+    })
+  }, [activeDraftStages, stageData, stageEditMode])
+
+  const stageEditDirty = useMemo(() => {
+    if (!stageEditMode) return false
+    if (draftDeletedStages.length > 0) return true
+    if (draftStages.some(stage => stage.isNew)) return true
+    const currentById = new Map((pipelineStages.length > 0 ? pipelineStages : stageData)
+      .slice()
+      .sort((a, b) => a.position - b.position)
+      .map((stage, idx) => [stage.id, { name: stage.name, color: stage.color, index: idx }])
+    )
+    return activeDraftStages.some((stage, idx) => {
+      const current = currentById.get(stage.id)
+      return !current || current.name !== stage.name || current.color !== stage.color || current.index !== idx
+    })
+  }, [activeDraftStages, draftDeletedStages.length, draftStages, pipelineStages, stageData, stageEditMode])
+
+  const stageSaveBlocked = useMemo(() => (
+    draftDeletedStages.some(deletion => {
+      const stageStillDeleted = draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew)
+      if (!stageStillDeleted) return false
+      return !deletion.moveToStageId || !activeDraftStages.some(stage => stage.id === deletion.moveToStageId && !stage.isNew)
+    })
+  ), [activeDraftStages, draftDeletedStages, draftStages])
+
+  const kanbanColumnCount = renderedStageData.length + (unassignedData.total_count > 0 ? 1 : 0)
+
   const allFilteredParticipants = useMemo(() => {
     if (viewMode === 'list') return listParticipants
     return allLoadedParticipants
@@ -925,28 +1068,221 @@ export default function EventDetailPage() {
     finally { setBulkMoving(false) }
   }, [selectedIds, eventId, pipelineStages, stageData, updateParticipantInStages, fetchParticipantsPaginated])
 
-  // ─── Rename Stage (inline kanban editing) ────────────────────────────────────
+  const applyStageManagementResponse = useCallback((data: any) => {
+    const pipelineChanged = Boolean(data.pipeline_id && event?.pipeline_id && data.pipeline_id !== event.pipeline_id)
+    if (data.pipeline_id) {
+      setEvent(prev => prev ? { ...prev, pipeline_id: data.pipeline_id } : prev)
+    }
+    if (pipelineChanged) {
+      setFilterStageIds(new Set())
+    }
+    if (data.stages) {
+      setPipelineStages((data.stages || []).sort((a: PipelineStage, b: PipelineStage) => a.position - b.position))
+    }
+    fetchEvent()
+    fetchParticipantsPaginated()
+    if (viewMode === 'list') fetchListParticipants(true)
+  }, [event?.pipeline_id, fetchEvent, fetchParticipantsPaginated, fetchListParticipants, viewMode])
+
+  // ─── Stage Management ───────────────────────────────────────────────────────
+  const beginStageEditMode = useCallback(() => {
+    const sourceStages = (pipelineStages.length > 0 ? pipelineStages : stageData)
+      .slice()
+      .sort((a, b) => a.position - b.position)
+    const countByStage = new Map(stageData.map(s => [s.id, s.total_count]))
+    setDraftStages(sourceStages.map((stage, idx) => ({
+      id: stage.id,
+      pipeline_id: stage.pipeline_id,
+      name: stage.name,
+      color: stage.color || '#6366f1',
+      position: idx,
+      total_count: countByStage.get(stage.id) || 0,
+    })))
+    setDraftDeletedStages([])
+    setStageLayoutError('')
+    setDraggedStageId(null)
+    setStageEditMode(true)
+    setShowMoreMenu(false)
+  }, [pipelineStages, stageData])
+
+  const cancelStageEditMode = useCallback(() => {
+    setStageEditMode(false)
+    setDraftStages([])
+    setDraftDeletedStages([])
+    setStageLayoutError('')
+    setDraggedStageId(null)
+    setShowStageModal(false)
+    setNewStageName('')
+    setNewStageColor('#3b82f6')
+  }, [])
+
+  const handleCreateStage = useCallback(async () => {
+    const name = newStageName.trim()
+    if (!name || stageLayoutSaving) return
+    if (!stageEditMode) {
+      beginStageEditMode()
+    }
+    const clientId = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    setDraftStages(prev => {
+      const activeCount = prev.filter(s => !s.isDeleted).length
+      return [...prev, {
+        id: clientId,
+        clientId,
+        pipeline_id: event?.pipeline_id || '',
+        name,
+        color: newStageColor,
+        position: activeCount,
+        total_count: 0,
+        isNew: true,
+      }]
+    })
+    setShowStageModal(false)
+    setNewStageName('')
+    setNewStageColor('#3b82f6')
+    setStageLayoutError('')
+  }, [beginStageEditMode, event?.pipeline_id, newStageColor, newStageName, stageEditMode, stageLayoutSaving])
+
   const handleRenameStage = useCallback(async (stageId: string, newName: string) => {
-    if (!event?.pipeline_id || !newName.trim()) return
-    const stages = pipelineStages.length > 0
-      ? pipelineStages
-      : stageData.map(s => ({ id: s.id, pipeline_id: s.pipeline_id, name: s.name, color: s.color, position: s.position }))
-    const updated = stages.map(s => ({
-      id: s.id, name: s.id === stageId ? newName.trim() : s.name, color: s.color, position: s.position,
-    }))
+    const name = newName.trim()
+    if (!name) return
+    if (!stageEditMode) return
+    setDraftStages(prev => prev.map(stage => stage.id === stageId ? { ...stage, name } : stage))
+    setStageLayoutError('')
+  }, [stageEditMode])
+
+  const handleColorStage = useCallback((stageId: string, color: string) => {
+    if (!stageEditMode) return
+    setDraftStages(prev => prev.map(stage => stage.id === stageId ? { ...stage, color } : stage))
+    setStageLayoutError('')
+  }, [stageEditMode])
+
+  const handleDeleteStage = useCallback(async (stageId: string, stageName: string, totalCount: number) => {
+    if (!stageEditMode) return
+    const activeStages = draftStages.filter(stage => !stage.isDeleted)
+    if (activeStages.length <= 1) {
+      setStageLayoutError('Debe quedar al menos una etapa activa.')
+      return
+    }
+    const stage = draftStages.find(item => item.id === stageId)
+    if (stage?.isNew) {
+      setDraftStages(prev => prev.filter(item => item.id !== stageId).map((item, idx) => ({ ...item, position: idx })))
+      return
+    }
+    const firstDestination = activeStages.find(item => item.id !== stageId)?.id || ''
+    setDraftStages(prev => prev.map(item => item.id === stageId ? { ...item, isDeleted: true } : item))
+    setDraftDeletedStages(prev => prev.some(item => item.stageId === stageId)
+      ? prev
+      : [...prev, { stageId, stageName, totalCount, moveToStageId: firstDestination }]
+    )
+    setStageLayoutError('')
+  }, [draftStages, stageEditMode])
+
+  const undoDeleteStage = useCallback((stageId: string) => {
+    setDraftStages(prev => prev.map(stage => stage.id === stageId ? { ...stage, isDeleted: false } : stage))
+    setDraftDeletedStages(prev => prev.filter(item => item.stageId !== stageId))
+    setStageLayoutError('')
+  }, [])
+
+  const setDeletedStageDestination = useCallback((stageId: string, moveToStageId: string) => {
+    setDraftDeletedStages(prev => prev.map(item => item.stageId === stageId ? { ...item, moveToStageId } : item))
+    setStageLayoutError('')
+  }, [])
+
+  const moveDraftStage = useCallback((fromId: string, toId: string) => {
+    if (!fromId || !toId || fromId === toId) return
+    setDraftStages(prev => {
+      const active = prev.filter(stage => !stage.isDeleted)
+      const deleted = prev.filter(stage => stage.isDeleted)
+      const fromIndex = active.findIndex(stage => stage.id === fromId)
+      const toIndex = active.findIndex(stage => stage.id === toId)
+      if (fromIndex < 0 || toIndex < 0) return prev
+      const next = [...active]
+      const [moved] = next.splice(fromIndex, 1)
+      next.splice(toIndex, 0, moved)
+      return [
+        ...next.map((stage, idx) => ({ ...stage, position: idx })),
+        ...deleted,
+      ]
+    })
+    setStageLayoutError('')
+  }, [])
+
+  const handleStageColumnDrop = useCallback((targetStageId: string) => {
+    if (!draggedStageId) return
+    moveDraftStage(draggedStageId, targetStageId)
+    setDraggedStageId(null)
+  }, [draggedStageId, moveDraftStage])
+
+  const saveStageLayout = useCallback(async () => {
+    if (stageLayoutSaving) return
+    const activeStages = draftStages
+      .filter(stage => !stage.isDeleted)
+      .sort((a, b) => a.position - b.position)
+    if (activeStages.length === 0) {
+      setStageLayoutError('Debe quedar al menos una etapa activa.')
+      return
+    }
+    const invalidStage = activeStages.find(stage => !stage.name.trim())
+    if (invalidStage) {
+      setStageLayoutError('Todas las etapas necesitan nombre.')
+      return
+    }
+    const invalidDeletion = draftDeletedStages.find(deletion => {
+      const stageStillDeleted = draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew)
+      if (!stageStillDeleted) return false
+      return !deletion.moveToStageId || !activeStages.some(stage => stage.id === deletion.moveToStageId && !stage.isNew)
+    })
+    if (invalidDeletion) {
+      setStageLayoutError(`Elige una etapa destino para "${invalidDeletion.stageName}".`)
+      return
+    }
+
+    setStageLayoutSaving(true)
+    setStageLayoutError('')
     try {
-      const res = await fetch(`/api/events/pipelines/${event.pipeline_id}/stages`, {
+      const res = await fetch(`/api/events/${eventId}/stages/layout`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ stages: updated }),
+        body: JSON.stringify({
+          stages: activeStages.map((stage, idx) => ({
+            ...(stage.isNew ? { clientId: stage.clientId || stage.id } : { id: stage.id }),
+            name: stage.name.trim(),
+            color: stage.color || '#6366f1',
+            position: idx,
+          })),
+          deletions: draftDeletedStages
+            .filter(deletion => draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew))
+            .map(deletion => ({
+              id: deletion.stageId,
+              moveTo: { kind: 'stage', id: deletion.moveToStageId },
+            })),
+        }),
       })
       const data = await res.json()
-      if (data.success) {
-        setPipelineStages(prev => prev.map(s => s.id === stageId ? { ...s, name: newName.trim() } : s))
-        setStageData(prev => prev.map(s => s.id === stageId ? { ...s, name: newName.trim() } : s))
+      if (!data.success) {
+        setStageLayoutError(data.error || 'No se pudo guardar el layout de etapas.')
+        return
       }
-    } catch (e) { console.error('[RenameStage]', e) }
-  }, [event?.pipeline_id, pipelineStages, stageData])
+      setFilterStageIds(prev => {
+        const deleted = new Set(draftDeletedStages.map(item => item.stageId))
+        const next = new Set(prev)
+        deleted.forEach(id => next.delete(id))
+        return next
+      })
+      applyStageManagementResponse(data)
+      setStageEditMode(false)
+      setDraftStages([])
+      setDraftDeletedStages([])
+      setShowStageModal(false)
+      setNewStageName('')
+      setNewStageColor('#3b82f6')
+    } catch (e) {
+      console.error('[SaveStageLayout]', e)
+      setStageLayoutError('No se pudo guardar el layout de etapas.')
+    } finally {
+      setStageLayoutSaving(false)
+    }
+  }, [applyStageManagementResponse, draftDeletedStages, draftStages, eventId, stageLayoutSaving])
 
   // ─── Add Participants ────────────────────────────────────────────────────────
   const existingContactIds = useMemo(() => {
@@ -2352,6 +2688,17 @@ export default function EventDetailPage() {
           </button>
         </div>
 
+        {viewMode === 'kanban' && !stageEditMode && (
+          <button
+            onClick={beginStageEditMode}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition-colors flex-shrink-0"
+            title="Editar etapas"
+          >
+            <PenLine className="w-4 h-4" />
+            <span className="hidden sm:inline">Editar etapas</span>
+          </button>
+        )}
+
         {/* ─── "Más" dropdown menu ─── */}
         <div ref={moreMenuRef} className="relative flex-shrink-0">
           <button
@@ -2418,9 +2765,18 @@ export default function EventDetailPage() {
                 Crear lead
               </button>
 
+              {/* 5. Editar etapas */}
+              <button
+                onClick={beginStageEditMode}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+              >
+                <PenLine className="w-4 h-4 text-slate-400" />
+                Editar etapas
+              </button>
+
               <div className="my-1 border-t border-slate-100" />
 
-              {/* 5. Exportar */}
+              {/* 6. Exportar */}
               <button
                 onClick={() => { setExportScope(activeFilterCount > 0 ? 'filtered' : 'all'); setShowExportModal(true); setShowMoreMenu(false) }}
                 className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
@@ -2429,7 +2785,7 @@ export default function EventDetailPage() {
                 Exportar
               </button>
 
-              {/* 6. Bitácora */}
+              {/* 7. Bitácora */}
               <button
                 onClick={() => { setViewMode(viewMode === 'logbook' ? 'kanban' : 'logbook'); setShowMoreMenu(false) }}
                 className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
@@ -2445,19 +2801,91 @@ export default function EventDetailPage() {
       {/* ═══ Kanban View ═══ */}
       {viewMode === 'kanban' && (
         <div className="flex-1 min-h-0 flex flex-col animate-view-enter">
+          {stageEditMode && (
+            <div className="shrink-0 border-y border-amber-200 bg-amber-50/90 px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-amber-900">Editando etapas</p>
+                  <p className="text-xs text-amber-700">Los cambios se aplican recién al guardar.</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowStageModal(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-amber-200 text-sm font-medium text-amber-800 hover:bg-amber-100 transition"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Etapa
+                  </button>
+                  <button
+                    onClick={cancelStageEditMode}
+                    disabled={stageLayoutSaving}
+                    className="px-3 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-white/70 transition disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={saveStageLayout}
+                    disabled={!stageEditDirty || stageSaveBlocked || stageLayoutSaving}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {stageLayoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                    Guardar cambios
+                  </button>
+                </div>
+              </div>
+              {(draftDeletedStages.length > 0 || stageLayoutError) && (
+                <div className="mt-3 space-y-2">
+                  {draftDeletedStages.map(deletion => {
+                    const stageStillDeleted = draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew)
+                    if (!stageStillDeleted) return null
+                    const destinationStages = activeDraftStages.filter(stage => stage.id !== deletion.stageId && !stage.isNew)
+                    return (
+                      <div key={deletion.stageId} className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2">
+                        <Trash2 className="w-4 h-4 text-red-500" />
+                        <span className="text-sm text-slate-700">Eliminar <strong>{deletion.stageName}</strong></span>
+                        {deletion.totalCount > 0 && <span className="text-xs text-slate-500">{deletion.totalCount} contacto(s)</span>}
+                        <select
+                          value={deletion.moveToStageId}
+                          onChange={e => setDeletedStageDestination(deletion.stageId, e.target.value)}
+                          className="min-w-[180px] rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/30"
+                        >
+                          <option value="">Mover a...</option>
+                          {destinationStages.map(stage => (
+                            <option key={stage.id} value={stage.id}>{stage.name}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => undoDeleteStage(deletion.stageId)}
+                          className="ml-auto px-2 py-1 text-xs font-medium text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md transition"
+                        >
+                          Deshacer
+                        </button>
+                      </div>
+                    )
+                  })}
+                  {stageLayoutError && (
+                    <div className="flex items-center gap-2 text-sm text-red-600">
+                      <AlertCircle className="w-4 h-4" />
+                      {stageLayoutError}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <div ref={topScrollRef} onScroll={handleTopScroll} className="overflow-x-auto kanban-scroll-top flex-shrink-0" style={{ height: 12 }}>
-            <div style={{ width: `${(stageData.length + (unassignedData.total_count > 0 ? 1 : 0)) * 288}px`, height: 1 }} />
+            <div style={{ width: `${kanbanColumnCount * 288}px`, height: 1 }} />
           </div>
           <div ref={kanbanRef} onScroll={handleKanbanScroll} className="overflow-x-auto flex-1 min-h-0 kanban-scroll">
-            <div className="flex gap-3 h-full" style={{ minWidth: `${(stageData.length + (unassignedData.total_count > 0 ? 1 : 0)) * 288}px` }}>
-              {stageData.map((stageItem) => (
+            <div className="flex gap-3 h-full" style={{ minWidth: `${kanbanColumnCount * 288}px` }}>
+              {renderedStageData.map((stageItem) => (
                 <VirtualKanbanColumn
                   key={stageItem.id}
                   column={stageItem}
                   totalCount={stageItem.total_count}
                   hasMore={stageItem.has_more}
                   loadingMore={loadingMoreStages.has(stageItem.id)}
-                  onLoadMore={() => loadMoreForStage(stageItem.id)}
+                  onLoadMore={() => { if (!stageEditMode) loadMoreForStage(stageItem.id) }}
                   selectedIds={selectedIds}
                   detailParticipantId={detailParticipant?.id || null}
                   draggedId={draggedId}
@@ -2472,6 +2900,14 @@ export default function EventDetailPage() {
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
                   onRenameStage={handleRenameStage}
+                  onColorStage={handleColorStage}
+                  onDeleteStage={handleDeleteStage}
+                  canManageStage={stageEditMode}
+                  canDragParticipants={!stageEditMode}
+                  stageEditMode={stageEditMode}
+                  onStageDragStart={setDraggedStageId}
+                  onStageDrop={handleStageColumnDrop}
+                  isStageDragging={draggedStageId === stageItem.id}
                 />
               ))}
               {unassignedData.total_count > 0 && (
@@ -2495,6 +2931,8 @@ export default function EventDetailPage() {
                   onDragOver={handleDragOver}
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
+                  canManageStage={false}
+                  canDragParticipants={!stageEditMode}
                 />
               )}
             </div>
@@ -3137,6 +3575,59 @@ export default function EventDetailPage() {
                 <p className="text-xs text-slate-400 mt-1">Elige una fecha del panel izquierdo para ver el detalle</p>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Stage Modal */}
+      {showStageModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setShowStageModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm border border-slate-100" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+              <h2 className="text-base font-semibold text-slate-900">Nueva etapa</h2>
+              <button onClick={() => setShowStageModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Nombre *</label>
+                <input
+                  value={newStageName}
+                  onChange={e => setNewStageName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleCreateStage(); if (e.key === 'Escape') setShowStageModal(false) }}
+                  className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none"
+                  placeholder="Ej: Seguimiento"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-2">Color</label>
+                <div className="flex flex-wrap gap-2">
+                  {STAGE_COLOR_OPTIONS.map(color => (
+                    <button
+                      key={color}
+                      type="button"
+                      onClick={() => setNewStageColor(color)}
+                      className={`w-8 h-8 rounded-full border-2 transition-all ${newStageColor === color ? 'border-slate-900 scale-110 shadow-sm' : 'border-white hover:scale-105'}`}
+                      style={{ backgroundColor: color }}
+                      title={color}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="px-5 py-4 border-t border-slate-100 flex justify-end gap-3">
+              <button onClick={() => setShowStageModal(false)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
+              <button
+                onClick={handleCreateStage}
+                disabled={!newStageName.trim() || stageLayoutSaving}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50"
+              >
+                {stageLayoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                Crear
+              </button>
+            </div>
           </div>
         </div>
       )}

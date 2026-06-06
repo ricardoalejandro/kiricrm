@@ -289,7 +289,7 @@ export default function ChatsPage() {
   }
 
   const deleteSelectedChats = async () => {
-    if (!confirm(`¿Eliminar ${selectedChats.size} chats?`)) return
+    if (!confirm(`¿Eliminar ${selectedChats.size} chats? Se eliminarán sus mensajes, pero no los contactos ni leads asociados.`)) return
     setDeleting(true)
     const token = localStorage.getItem('token')
     try {
