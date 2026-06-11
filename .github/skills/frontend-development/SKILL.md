@@ -1,13 +1,14 @@
 ---
 name: frontend-development
-description: Create beautiful, polished, and highly usable Next.js/React/TypeScript interfaces for Clarin CRM. Use when creating or modifying dashboard pages, components, API calls, WebSocket listeners, or UI styling. Enforces visual excellence, micro-interactions, accessibility, and the emerald/slate design system.
+description: Create polished, consistent, and highly usable Next.js/React/TypeScript interfaces for Clarin CRM. Use when creating or modifying dashboard pages, components, API calls, WebSocket listeners, or UI styling. Enforces consistency with the current screen, micro-interactions, accessibility, and safe API usage.
 ---
 
 # Frontend Development — Clarin CRM
 
 ## Philosophy: Beauty + Usability
 
-Every UI must feel **premium, polished, and alive**. Think Notion, Linear, Vercel Dashboard — dark themes done right. Never ship something that looks "functional but ugly." Every pixel matters.
+Every UI must feel polished, clear and operational. Match the current screen first;
+do not force an unrelated color mode or a new design language into an existing light dashboard.
 
 ## Stack
 - Next.js 14.2 (App Router), React 18.3, TypeScript 5.4 (strict mode)
@@ -31,7 +32,7 @@ frontend/src/
       settings/page.tsx           → Account settings
   components/
     CreateCampaignModal.tsx       → Campaign creation modal
-    ImportCSVModal.tsx            → CSV import modal
+    ImportCSVModal.tsx            → Excel import modal for Kommo/Clarín data
     NotificationProvider.tsx      → Toast notifications
     TagInput.tsx                  → Tag input component
     WhatsAppTextInput.tsx         → WhatsApp text formatting input
@@ -43,42 +44,15 @@ frontend/src/
 
 ---
 
-## Design System — emerald/slate (MANDATORY)
+## Design System — Match Existing UI
 
-**NEVER use green, gray, or any other color palette. Only emerald and slate.**
+The current dashboard is mostly light: white/slate surfaces, subtle borders,
+rounded panels and emerald accents. Before editing, inspect the target page and
+reuse its local classes, spacing, density, button shapes and icon style.
 
-### Core Palette
-
-| Element | Classes |
-|---------|---------|
-| Primary buttons | `bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-lg shadow-emerald-600/20` |
-| Secondary buttons | `bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600` |
-| Danger buttons | `bg-red-600/90 hover:bg-red-600 text-white` |
-| Page background | `bg-slate-900` |
-| Cards/panels | `bg-slate-800/80 backdrop-blur-sm border border-slate-700/50 rounded-xl shadow-xl` |
-| Elevated cards | `bg-slate-800 border border-slate-700/50 rounded-xl shadow-2xl shadow-black/20` |
-| Text primary | `text-white` or `text-slate-100` |
-| Text secondary | `text-slate-400` |
-| Text muted | `text-slate-500` |
-| Inputs | `bg-slate-800/50 border border-slate-600/50 text-white placeholder-slate-500 rounded-lg` |
-| Input focus | `focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none` |
-| Hover rows | `hover:bg-slate-700/40 transition-colors` |
-| Dividers | `border-slate-700/50` |
-| Badges/pills | `bg-emerald-500/10 text-emerald-400 text-xs font-medium px-2.5 py-0.5 rounded-full` |
-| Status green | `bg-emerald-500/10 text-emerald-400` |
-| Status yellow | `bg-amber-500/10 text-amber-400` |
-| Status red | `bg-red-500/10 text-red-400` |
-
-### Visual Depth & Layers
-
-```
-Layer 0 (page):     bg-slate-900
-Layer 1 (sidebar):  bg-slate-800/95 backdrop-blur-md
-Layer 2 (cards):    bg-slate-800/80 border-slate-700/50
-Layer 3 (modals):   bg-slate-800 border-slate-700/50 shadow-2xl
-Layer 4 (dropdowns): bg-slate-750 border-slate-600/50 shadow-xl
-Overlay:           bg-black/60 backdrop-blur-sm
-```
+Use emerald for primary actions, slate/gray for neutral UI, red for destructive
+actions and amber for caution. Do not introduce a one-off palette, oversized
+marketing composition or dark-only pattern unless the existing page already uses it.
 
 ---
 

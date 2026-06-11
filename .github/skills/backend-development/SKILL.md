@@ -1,6 +1,6 @@
 ---
 name: backend-development
-description: Build high-performance, optimized Go/Fiber backend services for Clarin CRM. Use when modifying API handlers, repository queries, services, domain entities, database migrations, Kommo sync, or WhatsApp integration. Enforces performance-first patterns, efficient SQL, proper indexing, caching, and zero-waste architecture.
+description: Build high-performance, optimized Go/Fiber backend services for Clarin CRM. Use when modifying API handlers, repository queries, services, domain entities, database migrations, local Kommo Excel import, or WhatsApp integration. Enforces performance-first patterns, efficient SQL, contact/lead/chat integrity, caching, and zero-waste architecture.
 ---
 
 # Backend Development — Clarin CRM
@@ -13,6 +13,16 @@ Every endpoint must be fast. Think sub-50ms for reads, sub-200ms for writes. Nev
 - Go 1.25, Fiber v2.52, pgx v5 (PostgreSQL), Redis v9
 - No local Go compiler — build via `docker compose build backend`
 
+## Data Integrity Rules
+
+- `Contact` is the parent entity. `Lead` and `Chat` are parallel children.
+- Creating a lead or chat must ensure a valid contact in the same account first.
+- Deleting a contact deletes its leads, chats and chat messages in an explicit backend transaction.
+- Deleting a lead must not delete its contact or chat.
+- Deleting a chat must not delete its contact or lead, but it does delete its messages.
+- Always validate `account_id` before reads, writes, batch deletes and repair jobs.
+- If repairing orphan leads/chats, reconnect by normalized phone only within the same account; delete only when no matching contact exists.
+
 ## Project Layout
 
 ```
@@ -24,8 +34,8 @@ backend/
     repository/repository.go       → Data access layer (pgx/PostgreSQL)
     service/service.go             → Business logic
     kommo/
-      client.go                    → Rate-limited Kommo API v4 HTTP client
-      sync.go                      → One-way Kommo → Clarin sync worker (5s polling)
+      client.go                    → Dormant API client kept for Kommo compatibility
+      sync.go                      → Dormant sync code; local Excel import is the active flow
     whatsapp/device_pool.go        → WhatsApp multi-device pool (whatsmeow)
     ws/hub.go                      → WebSocket hub for real-time broadcasts
   pkg/
@@ -268,7 +278,7 @@ if err != nil {
 ### Logging with Prefixes
 ```go
 log.Printf("[API] Creating lead for account %d", accountID)
-log.Printf("[SYNC] Syncing %d leads from Kommo", len(leads))
+log.Printf("[IMPORT] Processing %d Kommo Excel rows", len(rows))
 log.Printf("[WHATSAPP] Device %s connected", deviceID)
 log.Printf("[WS] Broadcasting to account %d", accountID)
 ```

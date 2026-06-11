@@ -1,63 +1,50 @@
 ---
 name: kommo-integration
-description: Work with Kommo CRM integration in Clarin. Use when modifying the sync worker, API client, lead/contact/tag synchronization, or phone normalization. Covers the one-way Kommo to Clarin sync flow.
+description: Work with Kommo data in Clarin through local Excel imports, phone normalization, status/date tags, observations, and compatibility metadata. Use when modifying Kommo import logic or normalized Kommo fields. Do not use to reactivate API sync with Kommo without an explicit product decision.
 ---
 
-# Kommo CRM Integration — Clarin CRM
+# Kommo Local Import — Clarin CRM
 
-## Architecture
+## Current Rule
 
-Kommo integration is a **one-way sync** (Kommo → Clarin) using the Kommo REST API v4.
+API communication with Kommo is intentionally dormant. Keep client structs, `kommo_id`
+metadata and helpers for compatibility, but do not restart API pollers, webhooks,
+outbox jobs or frontend sync actions unless product explicitly asks for it.
 
-```
-backend/internal/kommo/
-  client.go     → Rate-limited HTTP client for Kommo API
-  sync.go       → SyncService: background worker (5s polling)
-```
+The supported Kommo flow is local Excel import from the leads UI.
 
-## Sync Flow
+## Excel Import Behavior
 
-1. `SyncService.Start()` launches a goroutine that polls every 5 seconds
-2. Fetches leads, contacts, tags from Kommo API
-3. Upserts into PostgreSQL via `repository.go`
-4. Broadcasts `lead_update` via WebSocket after sync
+- UI accepts only `.xlsx/.xls`; it may convert the workbook to CSV internally for backend reuse.
+- Use `kommo.NormalizePhone()` for phone matching and creation.
+- Leads nuevos always get created when basic validation passes, even if Kommo `Fecha de Creación` is older than 24h.
+- The 24h window only controls modifications to existing Clarín leads/contacts.
+- Existing leads outside the 24h window must not be touched.
+- New leads may receive manual import tags, Excel tags, Kommo status tags, `✅ Fecha` tags and a `Komo: ...` observation.
+- Existing leads inside the 24h window may sync only Kommo status/date tags; do not move pipeline/stage or rewrite notes/tasks.
 
-## Key Components
+## Status Tags
 
-### client.go — Kommo API Client
-- Rate-limited (respects Kommo's API limits)
-- `GetLeads()` — Fetches leads with pagination
-- `GetContacts()` — Fetches contacts with pagination
-- `GetTags()` — Fetches ALL tags with full pagination (fixed: was only page 1)
-- Auth via Bearer token from environment variable
+Closed Kommo status tag set:
 
-### sync.go — Sync Service
-- `SyncService` struct with `client`, `repo`, `db`, `hub`
-- `upsertLead()` → creates/updates lead, calls `syncLeadTags()`
-- `upsertContact()` → creates/updates contact, calls `syncContactTags()`
-- `syncLeadTags()` → populates `lead_tags` junction table
-- `syncContactTags()` → populates `contact_tags` junction table
-- `NormalizePhone()` → Exported function for phone normalization
+`CONFIRMADO`, `FLUJO INCOMPLETO`, `OTRAS CONSULTAS`, `REVIVIÓ`, `NO RESPONDE`
 
-## Phone Normalization
+When a new lead or eligible existing lead brings one of these statuses, keep only
+one status tag from this set on the contact. Compare case-insensitively and
+tolerate extra spaces. Do not remove unrelated tags.
 
-```go
-// Peru (51) is the only country supported
-// 9-digit numbers starting with 9 get "51" prefix automatically
-normalized := kommo.NormalizePhone("987654321")  // → "51987654321"
-normalized := kommo.NormalizePhone("51987654321") // → "51987654321" (unchanged)
-```
+## Observations
 
-**ALWAYS use `kommo.NormalizePhone()` when handling phone numbers** in:
-- `api/server.go` → `handleCreateLead()`
-- `service/service.go` → `CreateNewChat()`
-- `kommo/sync.go` → all sync operations
+For new leads only, create a note when values exist:
 
-## Adding New Synced Fields
+`Komo: Status: <Estatus del lead>; Campaña: <Campaña>`
 
-1. Add field to Kommo API response struct
-2. Add field to domain entity in `domain/entities.go`
-3. Add migration in `database.go`
-4. Update `upsertLead()` or `upsertContact()` in `sync.go`
-5. Update repository queries
-6. Build, deploy, verify sync in logs
+Accept campaign headers normalized from variants such as `✅ Campaña`. Missing
+columns or empty values must not break the import.
+
+## Safety
+
+- Never print imported personal data, raw workbook rows, tokens or secrets in logs.
+- Reimports must be idempotent: existing leads should not lose tags, observations,
+  tasks or stage unless the explicit 24h status/date rule applies.
+- After backend changes, build/deploy with Docker and verify logs plus `/health`.

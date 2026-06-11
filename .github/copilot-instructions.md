@@ -26,35 +26,37 @@ Actúa como un ingeniero de software senior con más de 15 años de experiencia 
 |------|-----------|---------|
 | Frontend | Next.js (App Router) | 14.2 |
 | UI | React + TypeScript + Tailwind CSS | 18.3 / 5.4 / 3.4 |
-| Backend | Go + Fiber | 1.24 / 2.52 |
+| Backend | Go + Fiber | 1.25.0 / 2.52 |
 | Base de datos | PostgreSQL | 16 |
 | Cache | Redis (pkg/cache) | 7 |
-| Almacenamiento | MinIO (S3-compatible) | latest |
-| WhatsApp | whatsmeow | latest |
-| CRM externo | Kommo API v4 | — |
+| Almacenamiento | MinIO (S3-compatible) | imagen definida en docker-compose |
+| WhatsApp | whatsmeow | v0.0.0-20260604205742-c6a4b703e48f |
+| CRM externo | API de Kommo v4 dormida | — |
 | Contenedores | Docker Compose | — |
 | Deploy | Dokploy | clarin.naperu.cloud |
 
 ---
 
-## Kommo API Dormido
+## API de Kommo Dormida
 
 La estructura Kommo se conserva para compatibilidad futura: columnas `kommo_id`,
-metadata de importación CSV, repositorios, tipos y helpers como
+metadata de importación Excel/CSV interna, repositorios, tipos y helpers como
 `kommo.NormalizePhone()`. Sin embargo, la comunicación por API con Kommo está
 intencionalmente desactivada.
 
 - No iniciar `kommo.Manager`, outbox, reconciliación, poller de eventos ni auto-registro de webhooks.
 - No exponer acciones frontend para sincronizar, forzar pull, crear/editar integraciones Kommo o borrar/mover leads en Kommo.
 - No reactivar rutas o workers que llamen a Kommo sin una decisión explícita de producto y una revisión de seguridad de datos.
-- La importación CSV Kommo sí puede seguir funcionando porque es un flujo local y no llama a la API de Kommo.
+- La importación Excel de Kommo sí puede seguir funcionando porque es un flujo local y no llama a la API de Kommo.
+- La UI de importación acepta sólo `.xlsx/.xls`; internamente puede convertir el Excel a CSV para reutilizar endpoints existentes.
 
 ## Seguridad de Acceso
 
 - Clarín no permite registro público. No habilitar `/signup` ni `POST /api/auth/register`; los usuarios y cuentas se crean sólo desde el panel administrador.
 - El login en producción debe usar Cloudflare Turnstile con `TURNSTILE_SITE_KEY` y `TURNSTILE_SECRET_KEY` configurados como variables de entorno. Nunca commitear la clave secreta.
-- La autenticación real vive en cookies httpOnly (`auth-token` y `refresh-token`). El frontend sólo puede guardar un marcador de sesión en `localStorage`, no el JWT real.
+- La autenticación objetivo vive en cookies httpOnly (`auth-token` y `refresh-token`). El frontend puede conservar compatibilidad temporal con `Authorization` desde `localStorage`, pero no debe ampliarse ese patrón.
 - Las contraseñas nuevas deben cumplir la política fuerte del backend: mínimo 10 caracteres, mayúscula, minúscula, número y símbolo.
+- Nunca imprimir ni commitear `.env`, tokens, cookies, JWT, contraseñas, secretos de MinIO/JWT/Turnstile ni respuestas completas de login.
 
 ---
 
@@ -75,8 +77,8 @@ backend/
       sql_builder.go               → AST → SQL parametrizado (PostgreSQL)
       evaluator.go                 → AST + lista de tags → evaluación booleana
     kommo/                         → Integración con Kommo CRM
-      client.go                    → Cliente HTTP para Kommo API v4
-      sync.go                      → Worker de sincronización unidireccional Kommo→Clarin
+      client.go                    → Cliente HTTP para API de Kommo v4
+      sync.go                      → Código de sync dormido; el flujo activo es importación Excel local
     repository/                    → Capa de datos (pgx/PostgreSQL)
       repository.go                → Repositorio principal (leads, contacts, chats, events, etc.)
       program_repository.go        → Repositorio de programas
@@ -120,7 +122,7 @@ frontend/
       FormulaEditor.tsx            → Editor de fórmulas con tokenizer, autocomplete y validación en tiempo real
       ContactSelector.tsx          → Selector de contactos
       CreateCampaignModal.tsx      → Modal de creación de campañas
-      ImportCSVModal.tsx           → Modal de importación CSV
+      ImportCSVModal.tsx           → Modal de importación Excel de Kommo/Clarín
       LeadDetailPanel.tsx          → Panel lateral de detalle de lead
       NotificationProvider.tsx     → Proveedor de notificaciones toast
       TagInput.tsx                 → Input de etiquetas con autocompletado
@@ -266,7 +268,9 @@ Sistema de expresiones para filtrar leads/participantes por etiquetas. Soporta:
 - **Database migrations:** Las migraciones están en `database.go` como SQL ejecutado en `InitDB()`. Para cambios de esquema, agregar `ALTER TABLE` o `CREATE TABLE IF NOT EXISTS` al final de la función.
 - **Módulos multi-archivo:** Features grandes dividen handler/repository/service en archivos con prefijo (ej: `program_handler.go`, `program_repository.go`, `program_service.go`) junto a los archivos principales.
 - **Cache:** Usar `pkg/cache` para datos frecuentes. Invalidar con `DelPattern()` cuando datos cambian.
-- **Storage:** Usar `internal/storage` para archivos. Métodos: `Upload()`, `GetURL()`, `Delete()`. URLs públicas via MinIO.
+- **Storage:** Usar `internal/storage` para archivos. Métodos principales: `UploadFile()` y `DeleteFile()`. URLs públicas via MinIO.
+- **Jerarquía de datos:** `Contact` es padre; `Lead` y `Chat` son hijos paralelos. Crear lead/chat exige `contact_id`. Eliminar contacto borra leads, chats y mensajes; eliminar lead no borra chat; eliminar chat no borra lead.
+- **Storage seguro:** En MinIO, borrar automáticamente sólo objetos bajo prefijos `account_id/` que ya no existen en `accounts`. Objetos sin referencia dentro de cuentas activas requieren dry-run, antigüedad mínima o confirmación explícita.
 
 ### TypeScript/React (Frontend)
 
@@ -297,8 +301,9 @@ Sistema de expresiones para filtrar leads/participantes por etiquetas. Soporta:
 4. Si hay errores → analizar → corregir → volver al paso 3
 5. Deploy: docker compose up -d
 6. Verificar logs: docker compose logs --tail=30 [servicio]
-7. Si hay errores en runtime → analizar → corregir → volver al paso 3
-8. Confirmar al usuario que todo está funcionando
+7. Verificar `/health`; reportar `whatsapp.devices_connected/devices_total` si baja después del deploy
+8. Si hay errores en runtime → analizar → corregir → volver al paso 3
+9. Confirmar al usuario que todo está funcionando
 ```
 
 ### Para cambios de base de datos:
@@ -405,8 +410,8 @@ if s.hub != nil {
 ### Upload de archivos:
 
 ```go
-// Usar storage.Upload() para subir a MinIO
-url, err := s.storage.Upload(ctx, file, "carpeta/nombre.ext", contentType)
+// Usar storage.UploadFile() para subir a MinIO
+url, err := s.storage.UploadFile(ctx, accountID, "carpeta", "nombre.ext", data, contentType)
 // URL pública disponible inmediatamente
 ```
 
@@ -427,8 +432,8 @@ url, err := s.storage.Upload(ctx, file, "carpeta/nombre.ext", contentType)
 - [ ] ¿Se invalida cache si aplica?
 - [ ] ¿Los eventos de componentes usan stopPropagation donde es necesario?
 
-## Recent Changes
-- 003-programs-fix-filters: Added TypeScript 5.4 (frontend), Go 1.24 (backend — no changes needed) + Next.js 14, React 18, Tailwind CSS 3.4, FormulaEditor component
-- 001-program-contacts-only: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
-
 ## Active Technologies
+- Frontend: Next.js 14.2, React 18.3, TypeScript 5.4, Tailwind CSS 3.4
+- Backend: Go 1.25.0, toolchain go1.25.11, Fiber 2.52, pgx v5
+- WhatsApp: whatsmeow v0.0.0-20260604205742-c6a4b703e48f
+- Storage: MinIO/S3-compatible

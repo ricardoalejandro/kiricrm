@@ -35,6 +35,9 @@ cd /root/proyect/clarin && docker compose up -d
 
 Always check logs after deploy:
 ```bash
+# Healthcheck
+docker compose exec -T backend wget -qO- http://127.0.0.1:8080/health
+
 # Backend logs
 docker compose logs --tail=30 backend
 
@@ -53,8 +56,10 @@ After EVERY code change, follow this exact sequence:
 2. **If build fails**: Read the error, fix it, rebuild. Repeat until clean.
 3. **Deploy** — `docker compose up -d`
 4. **Check logs** — `docker compose logs --tail=30 backend` or `frontend`
-5. **If runtime errors**: Read the logs, fix the issue, rebuild and redeploy.
-6. **NEVER present code to the user without a successful build and clean logs.**
+5. **Check health** — verify `/health` returns healthy dependencies.
+6. **Check WhatsApp count** — compare `whatsapp.devices_connected/devices_total`; report any drop after restart.
+7. **If runtime errors**: Read the logs, fix the issue, rebuild and redeploy.
+8. **NEVER present code to the user without a successful build, healthcheck and clean relevant logs.**
 
 ## Common Build Errors
 

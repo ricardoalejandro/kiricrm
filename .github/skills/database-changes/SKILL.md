@@ -55,15 +55,25 @@ _, _ = db.Exec(ctx, `
 2. **ALWAYS use parameterized queries** in repository code — never concatenate values.
 3. After adding a migration, **update the corresponding struct** in `domain/entities.go`.
 4. Update **repository queries** (SELECT, INSERT, UPDATE) in `repository/repository.go`.
-5. Build and deploy to verify: `docker compose build backend && docker compose up -d`
-6. Check logs to confirm migration ran: `docker compose logs --tail=30 backend`
+5. Protect `account_id` boundaries in every FK repair, delete and backfill query.
+6. Build and deploy to verify: `docker compose build backend && docker compose up -d`
+7. Check logs to confirm migration ran: `docker compose logs --tail=30 backend`
+
+## Contact / Lead / Chat Integrity
+
+- `contacts` is the parent table. `leads` and `chats` should have valid `contact_id`.
+- Do not create new flows that allow leads or chats without a contact.
+- Prefer explicit backend transactions for contact deletion: delete chats/messages and leads first, then contact.
+- Avoid changing core FKs to broad `ON DELETE CASCADE` unless the account-scope implications are reviewed.
+- Before making `contact_id` stricter, repair or delete orphan leads/chats by same-account normalized phone.
+- Backfills must never connect records across accounts.
 
 ## Existing Key Tables
 
 - `accounts` — Multi-tenant accounts
 - `users` — Users per account
-- `leads` — CRM leads (synced from Kommo)
-- `contacts` — CRM contacts (synced from Kommo)
+- `contacts` — Parent CRM/WhatsApp contacts
+- `leads` — CRM leads linked to contacts
 - `chats` — WhatsApp conversations
 - `messages` — Chat messages
 - `tags` — Tags with `UNIQUE(account_id, name)` and `kommo_id`

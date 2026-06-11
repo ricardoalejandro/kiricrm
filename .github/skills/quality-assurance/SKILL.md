@@ -35,6 +35,7 @@ cd /root/proyect/clarin && docker compose up -d
 
 ### Step 4: Verify Logs
 ```bash
+docker compose exec -T backend wget -qO- http://127.0.0.1:8080/health
 docker compose logs --tail=30 backend
 docker compose logs --tail=30 frontend
 ```
@@ -53,11 +54,13 @@ Only after ALL steps pass with zero errors, confirm to the user that everything 
 Before presenting any change, verify:
 
 - [ ] Code compiles without errors
-- [ ] Logs show clean startup (no panics, no errors)
+- [ ] Logs show clean relevant startup (no panics, no new runtime errors)
+- [ ] `/health` is healthy after deploy
+- [ ] WhatsApp `devices_connected/devices_total` was checked and any drop was reported
 - [ ] All errors are handled (no ignored `err` in Go)
 - [ ] SQL queries are parameterized ($1, $2...) — NO string concatenation
 - [ ] TypeScript types are correct and strict
-- [ ] UI uses emerald/slate palette only
+- [ ] UI matches the existing page style and uses emerald/slate accents consistently
 - [ ] Change is minimal and focused — no over-engineering
 - [ ] Existing code was read and understood before modifying
 - [ ] WebSocket broadcast added if data changes affect frontend
@@ -72,3 +75,5 @@ Before presenting any change, verify:
 5. **Hardcoded values** that should come from config/env
 6. **Deleted helper functions** — accidentally removed during large replacements
 7. **Missing route registration** — handler exists but route not added
+8. **Silent WhatsApp regression** — backend is healthy but devices dropped into QR/timeout after restart
+9. **Secret leakage** — `.env`, tokens, cookies, JWTs or login responses printed in logs/output
