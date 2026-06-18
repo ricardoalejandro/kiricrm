@@ -22,6 +22,7 @@ import ChatPanel from '@/components/chat/ChatPanel'
 import FormulaEditor from '@/components/FormulaEditor'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import { subscribeWebSocket } from '@/lib/api'
+import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import type { Lead } from '@/types/contact'
 import type { Chat } from '@/types/chat'
 import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
@@ -83,8 +84,14 @@ interface Contact {
 interface Device {
   id: string
   name: string
-  phone?: string
+  phone?: string | null
+  jid?: string | null
   status: string
+  normalized_phone?: string
+  historical_relation?: WhatsAppDeviceOption['historical_relation']
+  matches_historical?: boolean
+  has_different_number?: boolean
+  history_unknown?: boolean
 }
 
 function getDisplayName(c: Contact): string {
@@ -295,6 +302,7 @@ export default function ContactsPage() {
   const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false)
   const [existingChatForWA, setExistingChatForWA] = useState<any>(null)
   const [allDevicesForModal, setAllDevicesForModal] = useState<Device[]>([])
+  const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
 
   // Ver Leads modal
   const [showContactLeads, setShowContactLeads] = useState(false)
@@ -866,92 +874,44 @@ export default function ContactsPage() {
 
   const handleSendWhatsApp = async (phone: string) => {
     setWhatsappPhone(phone)
-    const cleanPhone = phone.replace(/[^0-9]/g, '')
-    const token = localStorage.getItem('token')
-
-    // Fetch all devices (connected + disconnected)
-    let allDevs: Device[] = []
     try {
-      const res = await fetch('/api/devices', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        allDevs = data.devices || []
+      const resolution = await resolveWhatsAppChat(phone)
+      if (!resolution.success) {
+        alert(resolution.error || 'Error al resolver conversación')
+        return
       }
-    } catch (err) {
-      console.error('Failed to fetch devices:', err)
-      alert('Error al obtener dispositivos')
-      return
-    }
-
-    const connectedDevices = allDevs.filter((d: Device) => d.status === 'connected')
-    if (connectedDevices.length === 0) {
-      // Check if there's an existing chat to show read-only
-      try {
-        const chatRes = await fetch(`/api/chats/find-by-phone/${cleanPhone}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        const chatData = await chatRes.json()
-        if (chatData.success && chatData.chat) {
-          setInlineChatId(chatData.chat.id)
-          setInlineChat(chatData.chat)
-          setInlineChatDeviceId(chatData.chat.device_id || '')
-          setInlineChatReadOnly(true)
-          setShowInlineChat(true)
-          return
-        }
-      } catch {}
-      alert('No hay dispositivos conectados')
-      return
-    }
-
-    // Check for existing chat with this phone
-    let existingChat: any = null
-    try {
-      const chatRes = await fetch(`/api/chats/find-by-phone/${cleanPhone}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const chatData = await chatRes.json()
-      if (chatData.success && chatData.chat) {
-        existingChat = chatData.chat
-      }
-    } catch {}
-
-    // If only 1 connected device → skip modal, open directly
-    if (connectedDevices.length === 1) {
-      const device = connectedDevices[0]
-      if (existingChat && existingChat.device_id === device.id) {
-        setInlineChatId(existingChat.id)
-        setInlineChat(existingChat)
-        setInlineChatDeviceId(device.id)
-        setInlineChatReadOnly(false)
+      setExistingChatForWA(resolution.chat || null)
+      setWhatsappHistoricalPhone(resolution.historical_phone || '')
+      if (resolution.mode === 'read_only' && resolution.chat) {
+        setInlineChatId(resolution.chat.id)
+        setInlineChat(resolution.chat)
+        setInlineChatDeviceId(resolution.chat.device_id || '')
+        setInlineChatReadOnly(true)
         setShowInlineChat(true)
         return
       }
-      await handleContactDeviceSelected(device)
-      return
+      if (resolution.mode === 'open_direct' && resolution.devices[0]) {
+        await handleContactDeviceSelected(resolution.devices[0] as Device, phone)
+        return
+      }
+      if (resolution.mode === 'choose_device') {
+        setAllDevicesForModal(resolution.devices as Device[])
+        setDevices(resolution.devices as Device[])
+        setShowSendMessage(true)
+        return
+      }
+      alert('No hay dispositivos conectados para enviar')
+    } catch (err) {
+      console.error('Failed to resolve WhatsApp chat:', err)
+      alert('Error de conexión')
     }
-
-    // Multiple connected devices → show smart modal
-    setExistingChatForWA(existingChat)
-    setAllDevicesForModal(allDevs)
-    setDevices(connectedDevices)
-    setShowSendMessage(true)
   }
 
-  const handleContactDeviceSelected = async (device: Device) => {
+  const handleContactDeviceSelected = async (device: Device, phoneOverride?: string) => {
     setShowSendMessage(false)
     setInlineChatReadOnly(false)
-    const cleanPhone = whatsappPhone.replace(/[^0-9]/g, '')
-    const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/chats/new', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ device_id: device.id, phone: cleanPhone }),
-      })
-      const data = await res.json()
+      const data = await createWhatsAppChat(device.id, phoneOverride || whatsappPhone)
       if (data.success && data.chat) {
         setInlineChatId(data.chat.id)
         setInlineChat(data.chat)
@@ -2360,8 +2320,13 @@ export default function ContactsPage() {
       {showSendMessage && selectedContact && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
-            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
-            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
+	            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
+	            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
+	            {existingChatForWA && (
+	              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
+	                Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
+	              </p>
+	            )}
             {devices.filter(d => d.status === 'connected').length === 0 ? (
               <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
@@ -2371,8 +2336,8 @@ export default function ContactsPage() {
                   if (existingChatForWA?.device_id === a.id) return -1
                   if (existingChatForWA?.device_id === b.id) return 1
                   return 0
-                }).map((device) => {
-                  const isChatOwner = existingChatForWA?.device_id === device.id
+	                }).map((device) => {
+	                  const isChatOwner = device.matches_historical || existingChatForWA?.device_id === device.id
                   return (
                     <button
                       key={device.id}
@@ -2385,12 +2350,13 @@ export default function ContactsPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                          {isChatOwner && (
-                            <span className="text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">Chat activo</span>
-                          )}
-                        </div>
-                        <p className="text-xs text-slate-500">{device.phone || ''}</p>
-                      </div>
+	                          {isChatOwner && (
+	                            <span className="text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">Chat activo</span>
+	                          )}
+	                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${relationClassName(device)}`}>{relationLabel(device)}</span>
+	                        </div>
+	                        <p className="text-xs text-slate-500">{deviceDisplayPhone(device)}</p>
+	                      </div>
                     </button>
                   )
                 })}

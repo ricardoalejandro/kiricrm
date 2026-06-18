@@ -1,5 +1,16 @@
 # Changelog — Clarin CRM
 
+## 2026-03-27
+
+### Build 1 — Eros AI Revamp
+- ✨ Eros ahora usa exclusivamente OpenAI (se eliminó soporte Gemini)
+- ✨ Selección de modelo AI después de validar API key (GPT-4o, GPT-4.1, etc.)
+- ✨ Pantalla de configuración personalizada: rol, persona e instrucciones custom
+- ✨ Atajo Ctrl+I / Cmd+I para abrir/cerrar Eros desde cualquier página
+- 🔧 Nuevos campos en usuario: eros_model, eros_role, eros_instructions
+- 🔧 Nuevo endpoint POST /api/ai/models para listar modelos disponibles
+- 🔧 buildSystemPrompt acepta rol e instrucciones personalizadas
+
 ## 2026-03-26
 
 ### Build 3 — Sistema de Versionamiento

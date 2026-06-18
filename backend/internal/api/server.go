@@ -327,6 +327,7 @@ func (s *Server) setupRoutes() {
 	// Chat routes
 	chats := protected.Group("/chats", s.requirePermission(domain.PermChats))
 	chats.Get("/", s.handleGetChats)
+	chats.Get("/resolve-whatsapp/:phone", s.handleResolveWhatsAppChat)
 	chats.Get("/find-by-phone/:phone", s.handleFindChatByPhone)
 	chats.Post("/new", s.handleCreateNewChat)
 	chats.Delete("/batch", s.handleDeleteChatsBatch)
@@ -371,6 +372,7 @@ func (s *Server) setupRoutes() {
 	leads.Get("/counts", s.handleGetLeadCounts)
 	leads.Get("/by-stage/:stageId", s.handleGetLeadsByStage)
 	leads.Post("/", s.handleCreateLead)
+	leads.Post("/from-contacts", s.handleCreateLeadsFromContacts)
 	leads.Delete("/batch", s.handleDeleteLeadsBatch)
 	leads.Post("/observations/batch", s.handleBatchLeadObservations)
 	leads.Patch("/batch/archive", s.handleArchiveLeadsBatch)
@@ -527,6 +529,7 @@ func (s *Server) setupRoutes() {
 	events.Get("/:id", s.handleGetEvent)
 	events.Put("/:id", s.handleUpdateEvent)
 	events.Delete("/:id", s.handleDeleteEvent)
+	events.Post("/:id/duplicate", s.handleDuplicateEvent)
 	events.Patch("/:id/move-folder", s.handleMoveEventToFolder)
 	// Event tag auto-sync
 	events.Get("/:id/tags", s.handleGetEventTags)
@@ -1933,6 +1936,148 @@ func (s *Server) handleFindChatByPhone(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "chat": chat})
 }
 
+func normalizeWhatsAppPhone(value string) string {
+	return kommo.NormalizePhone(value)
+}
+
+func normalizeDevicePhone(device *domain.Device) string {
+	if device == nil {
+		return ""
+	}
+	if device.Phone != nil && strings.TrimSpace(*device.Phone) != "" {
+		return normalizeWhatsAppPhone(*device.Phone)
+	}
+	if device.JID != nil && strings.TrimSpace(*device.JID) != "" {
+		return normalizeWhatsAppPhone(strings.Split(*device.JID, "@")[0])
+	}
+	return ""
+}
+
+func deviceCanSendManual(device *domain.Device) bool {
+	if device == nil || device.Status == nil || *device.Status != domain.DeviceStatusConnected {
+		return false
+	}
+	return getDeviceProvider(device) == domain.DeviceProviderWhatsAppWeb
+}
+
+func (s *Server) requireManualDeviceForAccount(ctx context.Context, accountID, deviceID uuid.UUID) (*domain.Device, error) {
+	device, err := s.services.Device.GetByID(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if device == nil || device.AccountID != accountID {
+		return nil, fiber.NewError(fiber.StatusNotFound, "Device not found")
+	}
+	if !deviceCanSendManual(device) {
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Dispositivo no conectado o no disponible para envio manual")
+	}
+	return device, nil
+}
+
+func (s *Server) latestOutboundSenderPhone(ctx context.Context, chatID uuid.UUID) string {
+	var fromJID string
+	err := s.repos.DB().QueryRow(ctx, `
+		SELECT COALESCE(from_jid, '')
+		FROM messages
+		WHERE chat_id = $1 AND is_from_me = TRUE AND COALESCE(from_jid, '') <> ''
+		ORDER BY timestamp DESC, created_at DESC
+		LIMIT 1
+	`, chatID).Scan(&fromJID)
+	if err != nil || strings.TrimSpace(fromJID) == "" {
+		return ""
+	}
+	return normalizeWhatsAppPhone(strings.Split(fromJID, "@")[0])
+}
+
+func (s *Server) chatHistoricalPhone(ctx context.Context, chat *domain.Chat) string {
+	if chat == nil {
+		return ""
+	}
+	if phone := s.latestOutboundSenderPhone(ctx, chat.ID); phone != "" {
+		return phone
+	}
+	if chat.DevicePhone != nil && strings.TrimSpace(*chat.DevicePhone) != "" {
+		return normalizeWhatsAppPhone(*chat.DevicePhone)
+	}
+	if chat.DeviceID != nil {
+		if device, _ := s.services.Device.GetByID(ctx, *chat.DeviceID); device != nil {
+			return normalizeDevicePhone(device)
+		}
+	}
+	return ""
+}
+
+func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	phone := c.Params("phone")
+	normalized := normalizeWhatsAppPhone(phone)
+	if normalized == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Phone is required"})
+	}
+
+	jid := normalized + "@s.whatsapp.net"
+	chat, err := s.services.Chat.FindByJID(c.Context(), accountID, jid)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	devices, err := s.services.Device.GetByAccountID(c.Context(), accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	historicalPhone := s.chatHistoricalPhone(c.Context(), chat)
+	usableDevices := make([]fiber.Map, 0)
+	for _, device := range devices {
+		if !deviceCanSendManual(device) {
+			continue
+		}
+		devicePhone := normalizeDevicePhone(device)
+		relation := "new_chat"
+		if chat != nil {
+			switch {
+			case historicalPhone == "":
+				relation = "history_unknown"
+			case devicePhone == historicalPhone:
+				relation = "same_historical_number"
+			default:
+				relation = "different_number"
+			}
+		}
+		usableDevices = append(usableDevices, fiber.Map{
+			"id":                   device.ID,
+			"name":                 device.Name,
+			"phone":                device.Phone,
+			"jid":                  device.JID,
+			"status":               device.Status,
+			"provider":             getDeviceProvider(device),
+			"normalized_phone":     devicePhone,
+			"historical_relation":  relation,
+			"matches_historical":   historicalPhone != "" && devicePhone == historicalPhone,
+			"has_different_number": chat != nil && historicalPhone != "" && devicePhone != "" && devicePhone != historicalPhone,
+			"history_unknown":      chat != nil && historicalPhone == "",
+		})
+	}
+
+	mode := "no_device"
+	if chat != nil && len(usableDevices) == 0 {
+		mode = "read_only"
+	} else if len(usableDevices) == 1 {
+		mode = "open_direct"
+	} else if len(usableDevices) > 1 {
+		mode = "choose_device"
+	}
+
+	return c.JSON(fiber.Map{
+		"success":          true,
+		"chat":             chat,
+		"phone":            normalized,
+		"jid":              jid,
+		"historical_phone": historicalPhone,
+		"devices":          usableDevices,
+		"mode":             mode,
+	})
+}
+
 func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
@@ -1948,6 +2093,12 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	if req.Phone == "" {
@@ -2159,8 +2310,11 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	var message *domain.Message
@@ -5061,6 +5215,142 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 	return c.Status(201).JSON(fiber.Map{"success": true, "lead": lead})
 }
 
+func (s *Server) handleCreateLeadsFromContacts(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	var req struct {
+		ContactIDs []uuid.UUID `json:"contact_ids"`
+		StageID    *uuid.UUID  `json:"stage_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if len(req.ContactIDs) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "contact_ids is required"})
+	}
+	if len(req.ContactIDs) > 200 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se pueden crear más de 200 leads por solicitud"})
+	}
+
+	var pipelineID, stageID *uuid.UUID
+	var err error
+	if req.StageID != nil {
+		pipelineID, stageID, err = s.repos.Pipeline.ResolveStageDestination(c.Context(), accountID, *req.StageID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		if pipelineID == nil || stageID == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid stage_id"})
+		}
+	} else {
+		pipelineID, stageID, err = s.repos.Pipeline.ResolveIncomingLeadDestination(c.Context(), accountID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+	}
+
+	seen := make(map[uuid.UUID]bool, len(req.ContactIDs))
+	createdLeads := make([]*domain.Lead, 0, len(req.ContactIDs))
+	errors := make([]fiber.Map, 0)
+	skipped := 0
+
+	for _, contactID := range req.ContactIDs {
+		if seen[contactID] {
+			skipped++
+			errors = append(errors, fiber.Map{"contact_id": contactID, "error": "contacto duplicado en la solicitud"})
+			continue
+		}
+		seen[contactID] = true
+
+		contact, err := s.services.Contact.GetByID(c.Context(), contactID)
+		if err != nil {
+			skipped++
+			errors = append(errors, fiber.Map{"contact_id": contactID, "error": err.Error()})
+			continue
+		}
+		if contact == nil || contact.AccountID != accountID || contact.IsGroup {
+			skipped++
+			errors = append(errors, fiber.Map{"contact_id": contactID, "error": "contacto no encontrado"})
+			continue
+		}
+
+		var hasActiveLead bool
+		if err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT EXISTS(
+				SELECT 1 FROM leads
+				WHERE account_id = $1
+				  AND contact_id = $2
+				  AND is_archived = false
+				  AND is_blocked = false
+			)
+		`, accountID, contact.ID).Scan(&hasActiveLead); err != nil {
+			skipped++
+			errors = append(errors, fiber.Map{"contact_id": contactID, "error": err.Error()})
+			continue
+		}
+		if hasActiveLead {
+			skipped++
+			errors = append(errors, fiber.Map{"contact_id": contactID, "error": "el contacto ya tiene un lead activo"})
+			continue
+		}
+
+		displayName := contact.DisplayName()
+		source := "contact"
+		lead := &domain.Lead{
+			AccountID:    accountID,
+			ContactID:    &contact.ID,
+			JID:          contact.JID,
+			Name:         strPtr(displayName),
+			LastName:     contact.LastName,
+			ShortName:    contact.ShortName,
+			Phone:        contact.Phone,
+			Email:        contact.Email,
+			Company:      contact.Company,
+			Age:          contact.Age,
+			DNI:          contact.DNI,
+			BirthDate:    contact.BirthDate,
+			Address:      contact.Address,
+			Distrito:     contact.Distrito,
+			Ocupacion:    contact.Ocupacion,
+			Status:       strPtr(domain.LeadStatusNew),
+			Source:       &source,
+			Notes:        contact.Notes,
+			Tags:         contact.Tags,
+			PipelineID:   pipelineID,
+			StageID:      stageID,
+			CustomFields: map[string]interface{}{},
+		}
+		if lead.Name != nil && *lead.Name == "" {
+			lead.Name = nil
+		}
+
+		if err := s.services.Lead.Create(c.Context(), lead); err != nil {
+			skipped++
+			errors = append(errors, fiber.Map{"contact_id": contactID, "error": err.Error()})
+			continue
+		}
+
+		if tags, tagErr := s.services.Tag.GetByEntity(c.Context(), "lead", lead.ID); tagErr == nil {
+			lead.StructuredTags = tags
+		}
+		createdLeads = append(createdLeads, lead)
+		s.broadcastLeadDelta(accountID, "created", lead)
+		s.triggerAutomationLeadCreated(accountID, lead.ID)
+	}
+
+	if len(createdLeads) > 0 {
+		s.invalidateLeadsCache(accountID)
+	}
+
+	return c.Status(201).JSON(fiber.Map{
+		"success": true,
+		"created": len(createdLeads),
+		"skipped": skipped,
+		"errors":  errors,
+		"leads":   createdLeads,
+	})
+}
+
 func (s *Server) handleGetLead(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	leadID, err := uuid.Parse(c.Params("id"))
@@ -7461,10 +7751,11 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 
 	// Parse filters
 	filter := domain.ContactFilter{
-		Search:  c.Query("search"),
-		Limit:   c.QueryInt("limit", 50),
-		Offset:  c.QueryInt("offset", 0),
-		IsGroup: c.QueryBool("is_group", false),
+		Search:            c.Query("search"),
+		Limit:             c.QueryInt("limit", 50),
+		Offset:            c.QueryInt("offset", 0),
+		IsGroup:           c.QueryBool("is_group", false),
+		WithoutActiveLead: c.QueryBool("without_active_lead", false),
 	}
 
 	if deviceIDStr := c.Query("device_id"); deviceIDStr != "" {
@@ -7559,7 +7850,7 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 	}
 
 	// Redis cache for default load (no complex filters) — 30s TTL
-	isDefaultContactsLoad := filter.Search == "" && len(filter.Tags) == 0 && len(filter.TagIDs) == 0 && len(filter.TagNames) == 0 && len(filter.MatchingContactIDs) == 0 && len(filter.CfFilterContactIDs) == 0 && filter.DeviceID == nil && filter.DateField == "" && !filter.HasPhone
+	isDefaultContactsLoad := filter.Search == "" && len(filter.Tags) == 0 && len(filter.TagIDs) == 0 && len(filter.TagNames) == 0 && len(filter.MatchingContactIDs) == 0 && len(filter.CfFilterContactIDs) == 0 && filter.DeviceID == nil && filter.DateField == "" && !filter.HasPhone && !filter.WithoutActiveLead
 	contactsCacheKey := ""
 	if isDefaultContactsLoad && s.cache != nil {
 		contactsCacheKey = fmt.Sprintf("contacts:%s:%d:%d", accountID.String(), filter.Limit, filter.Offset)
@@ -8577,6 +8868,12 @@ func (s *Server) handleCreateCampaign(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 	campaign := &domain.Campaign{
 		AccountID:       accountID,
 		DeviceID:        deviceID,
@@ -8676,9 +8973,17 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 		campaign.Name = *req.Name
 	}
 	if req.DeviceID != nil {
-		if did, err := uuid.Parse(*req.DeviceID); err == nil {
-			campaign.DeviceID = did
+		did, err := uuid.Parse(*req.DeviceID)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 		}
+		if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, did); err != nil {
+			if e, ok := err.(*fiber.Error); ok {
+				return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+			}
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		campaign.DeviceID = did
 	}
 	if req.MessageTemplate != nil {
 		campaign.MessageTemplate = *req.MessageTemplate
@@ -9145,9 +9450,23 @@ func (s *Server) handleUpdateCampaignRecipient(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleStartCampaign(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	campaign, err := s.services.Campaign.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
+	}
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, campaign.DeviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	var startedBy *uuid.UUID
 	if userID, ok := c.Locals("user_id").(uuid.UUID); ok {
@@ -9160,9 +9479,17 @@ func (s *Server) handleStartCampaign(c *fiber.Ctx) error {
 }
 
 func (s *Server) handlePauseCampaign(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	campaign, err := s.services.Campaign.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	if err := s.services.Campaign.Pause(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -9171,9 +9498,17 @@ func (s *Server) handlePauseCampaign(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleCancelCampaign(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	campaign, err := s.services.Campaign.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	if err := s.services.Campaign.Cancel(c.Context(), id); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -9182,9 +9517,23 @@ func (s *Server) handleCancelCampaign(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleRetryCampaignRecipient(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	campaignID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	campaign, err := s.services.Campaign.GetByID(c.Context(), campaignID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
+	}
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, campaign.DeviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	recipientID, err := uuid.Parse(c.Params("rid"))
 	if err != nil {
@@ -9197,9 +9546,17 @@ func (s *Server) handleRetryCampaignRecipient(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDuplicateCampaign(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	campaign, err := s.services.Campaign.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	var req struct {
 		MessageTemplate *string `json:"message_template"`
@@ -9619,6 +9976,24 @@ func (s *Server) handleDeleteEvent(c *fiber.Ctx) error {
 	}
 	s.invalidateEventsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleDuplicateEvent(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	duplicate, err := s.services.Event.DuplicateWithStageConfig(c.Context(), id, accountID, &userID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if duplicate == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
+	s.invalidateEventsCache(accountID)
+	return c.Status(201).JSON(fiber.Map{"success": true, "event": duplicate})
 }
 
 // handleGetEventTags returns the tags configured for auto-sync on an event (with negate flag and formula mode).
@@ -11332,6 +11707,12 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	// Build WHERE clause for participant filtering (same logic as handleGetEventParticipants)

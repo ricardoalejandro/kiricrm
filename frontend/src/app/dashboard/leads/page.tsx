@@ -1,17 +1,19 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import { es } from 'date-fns/locale'
 import FormulaEditor from '@/components/FormulaEditor'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import ImportCSVModal from '@/components/ImportCSVModal'
+import ContactSelector, { type SelectedPerson } from '@/components/ContactSelector'
 import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import { useRouter } from 'next/navigation'
 import { api, subscribeWebSocket } from '@/lib/api'
+import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
@@ -23,9 +25,14 @@ import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from 
 interface Device {
   id: string
   name: string
-  phone: string
-  jid: string
+  phone?: string | null
+  jid?: string | null
   status: string
+  normalized_phone?: string
+  historical_relation?: WhatsAppDeviceOption['historical_relation']
+  matches_historical?: boolean
+  has_different_number?: boolean
+  history_unknown?: boolean
 }
 
 interface StageData {
@@ -368,6 +375,8 @@ export default function LeadsPage() {
   const [obsDisplayCount, setObsDisplayCount] = useState(5)
   const [showHistoryModal, setShowHistoryModal] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
+  const [showContactImportModal, setShowContactImportModal] = useState(false)
+  const [importingContacts, setImportingContacts] = useState(false)
   const [historyFilterType, setHistoryFilterType] = useState('')
   const [historyFilterFrom, setHistoryFilterFrom] = useState('')
   const [historyFilterTo, setHistoryFilterTo] = useState('')
@@ -407,6 +416,7 @@ export default function LeadsPage() {
   const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false)
   const [existingChatForWA, setExistingChatForWA] = useState<any>(null)
   const [allDevicesForModal, setAllDevicesForModal] = useState<Device[]>([])
+  const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
 
   // Device filter for leads
   const [filterDeviceIds, setFilterDeviceIds] = useState<Set<string>>(new Set())
@@ -1186,6 +1196,42 @@ export default function LeadsPage() {
     }
   }
 
+  const handleCreateLeadsFromContacts = async (contacts: SelectedPerson[]) => {
+    if (contacts.length === 0 || importingContacts) return
+    const token = localStorage.getItem('token')
+    setImportingContacts(true)
+    try {
+      const res = await fetch('/api/leads/from-contacts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ contact_ids: contacts.map(c => c.id) }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) {
+        alert(data.error || 'Error al crear leads desde contactos')
+        return
+      }
+      setShowContactImportModal(false)
+      await Promise.all([
+        fetchLeadsPaginated(),
+        fetchPipelines(activePipelineIdRef.current),
+      ])
+      const created = data.created || 0
+      const skipped = data.skipped || 0
+      if (skipped > 0) {
+        alert(`Se crearon ${created} lead(s). ${skipped} contacto(s) fueron omitidos porque ya tenían lead activo o no pudieron procesarse.`)
+      }
+    } catch (err) {
+      console.error('Failed to create leads from contacts:', err)
+      alert('Error al crear leads desde contactos')
+    } finally {
+      setImportingContacts(false)
+    }
+  }
+
   const handleDeleteSelected = async () => {
     if (selectedIds.size === 0) return
     if (!confirm(`¿Eliminar ${selectedIds.size} lead(s)? No se eliminarán contactos ni chats asociados.`)) return
@@ -1881,78 +1927,44 @@ export default function LeadsPage() {
   // WhatsApp internal chat — smart device selection
   const handleSendWhatsApp = async (phone: string) => {
     setWhatsappPhone(phone)
-    const cleanPhone = phone.replace(/[^0-9]/g, '')
+    try {
+      const resolution = await resolveWhatsAppChat(phone)
+      if (!resolution.success) {
+        alert(resolution.error || 'Error al resolver conversación')
+        return
+      }
+      setExistingChatForWA(resolution.chat || null)
+      setWhatsappHistoricalPhone(resolution.historical_phone || '')
 
-    // Fetch all devices (connected + disconnected)
-    let allDevices: Device[] = []
-    const devResult = await api<{ devices?: Device[] }>('/api/devices')
-    if (devResult.success && devResult.data) {
-      allDevices = devResult.data.devices || []
-    } else {
-      alert('Error al obtener dispositivos')
-      return
-    }
-
-    const connectedDevices = allDevices.filter((d: Device) => d.status === 'connected')
-    if (connectedDevices.length === 0) {
-      // Check if there's an existing chat to show read-only
-      const chatResult = await api<{ chat?: any }>(`/api/chats/find-by-phone/${cleanPhone}`)
-      if (chatResult.success && chatResult.data?.chat) {
-        // Open existing chat in read-only mode
-        setInlineChatId(chatResult.data.chat.id)
-        setInlineChat(chatResult.data.chat)
-        setInlineChatDeviceId(chatResult.data.chat.device_id || '')
+      if (resolution.mode === 'read_only' && resolution.chat) {
+        setInlineChatId(resolution.chat.id)
+        setInlineChat(resolution.chat)
+        setInlineChatDeviceId(resolution.chat.device_id || '')
         setInlineChatReadOnly(true)
         setShowInlineChat(true)
         return
       }
-      alert('No hay dispositivos conectados')
-      return
-    }
-
-    // Check for existing chat with this phone
-    let existingChat: any = null
-    const chatResult = await api<{ chat?: any }>(`/api/chats/find-by-phone/${cleanPhone}`)
-    if (chatResult.success && chatResult.data?.chat) {
-      existingChat = chatResult.data.chat
-    }
-
-    // If only 1 connected device → skip modal, open directly
-    if (connectedDevices.length === 1) {
-      const device = connectedDevices[0]
-      // If existing chat is on this device, open it directly
-      if (existingChat && existingChat.device_id === device.id) {
-        setInlineChatId(existingChat.id)
-        setInlineChat(existingChat)
-        setInlineChatDeviceId(device.id)
-        setInlineChatReadOnly(false)
-        setShowInlineChat(true)
+      if (resolution.mode === 'open_direct' && resolution.devices[0]) {
+        await handleDeviceSelected(resolution.devices[0] as Device, phone)
         return
       }
-      // Otherwise create/reassign chat to this device
-      await handleDeviceSelected(device)
-      return
+      if (resolution.mode === 'choose_device') {
+        setAllDevicesForModal(resolution.devices as Device[])
+        setDevices(resolution.devices as Device[])
+        setShowDeviceSelector(true)
+        return
+      }
+      alert('No hay dispositivos conectados para enviar')
+    } catch {
+      alert('Error de conexión')
     }
-
-    // Multiple connected devices → show smart modal
-    setExistingChatForWA(existingChat)
-    setAllDevicesForModal(allDevices)
-    setDevices(connectedDevices)
-    setShowDeviceSelector(true)
   }
 
-  const handleDeviceSelected = async (device: Device) => {
+  const handleDeviceSelected = async (device: Device, phoneOverride?: string) => {
     setShowDeviceSelector(false)
     setInlineChatReadOnly(false)
-    const cleanPhone = whatsappPhone.replace(/[^0-9]/g, '')
-    const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/chats/new', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ device_id: device.id, phone: cleanPhone }),
-      })
-      const data = await res.json()
+      const data = await createWhatsAppChat(device.id, phoneOverride || whatsappPhone)
       if (data.success && data.chat) {
         // Open inline chat instead of navigating away
         setInlineChatId(data.chat.id)
@@ -3017,6 +3029,13 @@ export default function LeadsPage() {
                     Importar Excel
                   </button>
                   <button
+                    onClick={() => { setShowContactImportModal(true); setShowMoreMenu(false) }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                  >
+                    <UserPlus className="w-4 h-4 text-slate-400" />
+                    Crear desde contactos
+                  </button>
+                  <button
                     onClick={() => { setShowExportModal(true); setShowMoreMenu(false) }}
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
                   >
@@ -3805,8 +3824,13 @@ export default function LeadsPage() {
       {showDeviceSelector && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
-            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
-            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
+	            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
+	            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
+	            {existingChatForWA && (
+	              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
+	                Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
+	              </p>
+	            )}
             {devices.length === 0 ? (
               <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
@@ -3816,9 +3840,9 @@ export default function LeadsPage() {
                   if (existingChatForWA?.device_id === a.id) return -1
                   if (existingChatForWA?.device_id === b.id) return 1
                   return 0
-                }).map((device) => {
-                  const isChatOwner = existingChatForWA?.device_id === device.id
-                  return (
+	                }).map((device) => {
+	                  const isChatOwner = device.matches_historical || existingChatForWA?.device_id === device.id
+	                  return (
                     <button
                       key={device.id}
                       onClick={() => handleDeviceSelected(device)}
@@ -3830,12 +3854,13 @@ export default function LeadsPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                          {isChatOwner && (
-                            <span className="text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">Chat activo</span>
-                          )}
-                        </div>
-                        <p className="text-xs text-slate-500">{device.phone || device.jid}</p>
-                      </div>
+	                          {isChatOwner && (
+	                            <span className="text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">Chat activo</span>
+	                          )}
+	                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${relationClassName(device)}`}>{relationLabel(device)}</span>
+	                        </div>
+	                        <p className="text-xs text-slate-500">{deviceDisplayPhone(device)}</p>
+	                      </div>
                     </button>
                   )
                 })}
@@ -3873,6 +3898,20 @@ export default function LeadsPage() {
         onClose={() => setShowImportModal(false)}
         onSuccess={() => { fetchLeadsPaginated(); fetchPipelines(activePipelineIdRef.current) }}
         defaultType="leads"
+      />
+
+      <ContactSelector
+        open={showContactImportModal}
+        onClose={() => {
+          if (!importingContacts) setShowContactImportModal(false)
+        }}
+        onConfirm={handleCreateLeadsFromContacts}
+        title="Crear leads desde contactos"
+        subtitle="Selecciona contactos existentes que todavía no tienen un lead activo"
+        confirmLabel={importingContacts ? 'Creando...' : 'Crear leads'}
+        sourceFilter="contact"
+        advancedFilters
+        withoutActiveLead
       />
 
       {/* Broadcast from Leads Modal */}

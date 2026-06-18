@@ -1404,6 +1404,16 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		argNum++
 	}
 
+	if filter.WithoutActiveLead {
+		baseQuery += ` AND NOT EXISTS (
+			SELECT 1 FROM leads l
+			WHERE l.account_id = contacts.account_id
+			  AND l.contact_id = contacts.id
+			  AND l.is_archived = false
+			  AND l.is_blocked = false
+		)`
+	}
+
 	if filter.DateField == "created_at" || filter.DateField == "updated_at" {
 		if filter.DateFrom != "" {
 			baseQuery += fmt.Sprintf(" AND %s >= $%d", filter.DateField, argNum)
@@ -1514,6 +1524,16 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		selectQuery += fmt.Sprintf(" AND c.id = ANY($%d)", selectArgNum)
 		selectArgs = append(selectArgs, filter.CfFilterContactIDs)
 		selectArgNum++
+	}
+
+	if filter.WithoutActiveLead {
+		selectQuery += ` AND NOT EXISTS (
+			SELECT 1 FROM leads l
+			WHERE l.account_id = c.account_id
+			  AND l.contact_id = c.id
+			  AND l.is_archived = false
+			  AND l.is_blocked = false
+		)`
 	}
 
 	if filter.DateField == "created_at" || filter.DateField == "updated_at" {
@@ -3627,6 +3647,122 @@ func (r *EventRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	}
 	_, err = r.db.Exec(ctx, `DELETE FROM events WHERE id = $1`, id)
 	return err
+}
+
+func (r *EventRepository) DuplicateWithStageConfig(ctx context.Context, sourceID, accountID uuid.UUID, createdBy *uuid.UUID) (*domain.Event, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	source := &domain.Event{}
+	if err := tx.QueryRow(ctx, `
+		SELECT id, account_id, pipeline_id, name, description, event_date, event_end, location, color
+		FROM events
+		WHERE id = $1 AND account_id = $2
+	`, sourceID, accountID).Scan(&source.ID, &source.AccountID, &source.PipelineID, &source.Name, &source.Description, &source.EventDate, &source.EventEnd, &source.Location, &source.Color); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	newPipelineID := uuid.New()
+	pipelineName := "Etapas - Copia de " + source.Name
+	pipelineDesc := "Pipeline duplicado desde " + source.Name
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO event_pipelines (id, account_id, name, description, is_default, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, FALSE, NOW(), NOW())
+	`, newPipelineID, accountID, pipelineName, pipelineDesc); err != nil {
+		return nil, err
+	}
+
+	var sourceStages []struct {
+		name     string
+		color    string
+		position int
+	}
+	if source.PipelineID != nil {
+		rows, err := tx.Query(ctx, `
+			SELECT name, color, position
+			FROM event_pipeline_stages
+			WHERE pipeline_id = $1
+			ORDER BY position
+		`, *source.PipelineID)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var stage struct {
+				name     string
+				color    string
+				position int
+			}
+			if err := rows.Scan(&stage.name, &stage.color, &stage.position); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			sourceStages = append(sourceStages, stage)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	if len(sourceStages) == 0 {
+		for i, stage := range defaultEventPipelineStages {
+			sourceStages = append(sourceStages, struct {
+				name     string
+				color    string
+				position int
+			}{name: stage.name, color: stage.color, position: i})
+		}
+	}
+	for i, stage := range sourceStages {
+		position := stage.position
+		if position < 0 {
+			position = i
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO event_pipeline_stages (id, pipeline_id, name, color, position, created_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
+		`, uuid.New(), newPipelineID, stage.name, stage.color, position); err != nil {
+			return nil, err
+		}
+	}
+
+	duplicate := &domain.Event{
+		ID:             uuid.New(),
+		AccountID:      accountID,
+		PipelineID:     &newPipelineID,
+		Name:           "Copia de " + source.Name,
+		Description:    source.Description,
+		EventDate:      source.EventDate,
+		EventEnd:       source.EventEnd,
+		Location:       source.Location,
+		Status:         domain.EventStatusDraft,
+		Color:          source.Color,
+		TagFormulaMode: "OR",
+		TagFormulaType: "simple",
+		CreatedBy:      createdBy,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	if duplicate.Color == "" {
+		duplicate.Color = "#3b82f6"
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO events (id, account_id, pipeline_id, name, description, event_date, event_end, location, status, color, tag_formula_mode, tag_formula, tag_formula_type, created_by, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'',$12,$13,$14,$15)
+	`, duplicate.ID, duplicate.AccountID, duplicate.PipelineID, duplicate.Name, duplicate.Description, duplicate.EventDate, duplicate.EventEnd, duplicate.Location, duplicate.Status, duplicate.Color, duplicate.TagFormulaMode, duplicate.TagFormulaType, duplicate.CreatedBy, duplicate.CreatedAt, duplicate.UpdatedAt); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return duplicate, nil
 }
 
 func (r *EventRepository) GetParticipantCounts(ctx context.Context, eventID uuid.UUID) (map[string]int, int, error) {

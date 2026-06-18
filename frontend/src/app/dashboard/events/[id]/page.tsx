@@ -9,7 +9,7 @@ import {
   FileSpreadsheet, FileText, FileDown, Loader2, StickyNote,
   Tag, CheckSquare, XCircle, Code, AlertCircle, AlertTriangle, BookOpen, Camera, Edit3,
   ChevronRight, PenLine, Settings, Lock, Archive, ArchiveRestore, ShieldBan, ShieldOff,
-  MoreHorizontal, ChevronDown, RefreshCw
+  MoreHorizontal, ChevronDown, RefreshCw, Copy, ArrowUp, ArrowDown
 } from 'lucide-react'
 import { format, formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -26,6 +26,7 @@ import { exportToExcel, exportToCSV } from '@/utils/eventExport'
 import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/eventWordReport'
 import { parseFormula, evaluateFormula } from '@/utils/formulaEvaluator'
 import { subscribeWebSocket } from '@/lib/api'
+import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 
 const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
@@ -134,7 +135,8 @@ interface StageData {
 interface TagInfo { name: string; color: string; count: number }
 
 interface Device {
-  id: string; name: string; phone_number: string; status: string
+  id: string; name: string; phone?: string | null; phone_number?: string; jid?: string | null; status: string
+  normalized_phone?: string; historical_relation?: WhatsAppDeviceOption['historical_relation']; matches_historical?: boolean
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -511,9 +513,12 @@ export default function EventDetailPage() {
   const [inlineChatId, setInlineChatId] = useState('')
   const [inlineChat, setInlineChat] = useState<Chat | null>(null)
   const [inlineChatDeviceId, setInlineChatDeviceId] = useState('')
+  const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false)
   const [showDeviceSelector, setShowDeviceSelector] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
   const [whatsappPhone, setWhatsappPhone] = useState('')
+  const [existingChatForWA, setExistingChatForWA] = useState<Chat | null>(null)
+  const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
   const whatsappPhoneRef = useRef('')
 
   // Add participant
@@ -564,6 +569,7 @@ export default function EventDetailPage() {
 
   // Stage management
   const [showStageModal, setShowStageModal] = useState(false)
+  const [showStageEditorModal, setShowStageEditorModal] = useState(false)
   const [newStageName, setNewStageName] = useState('')
   const [newStageColor, setNewStageColor] = useState('#3b82f6')
   const [stageEditMode, setStageEditMode] = useState(false)
@@ -572,6 +578,7 @@ export default function EventDetailPage() {
   const [stageLayoutSaving, setStageLayoutSaving] = useState(false)
   const [stageLayoutError, setStageLayoutError] = useState('')
   const [draggedStageId, setDraggedStageId] = useState<string | null>(null)
+  const [duplicatingEvent, setDuplicatingEvent] = useState(false)
 
   // Google Sync
   const [showGoogleSyncModal, setShowGoogleSyncModal] = useState(false)
@@ -1102,6 +1109,7 @@ export default function EventDetailPage() {
     setStageLayoutError('')
     setDraggedStageId(null)
     setStageEditMode(true)
+    setShowStageEditorModal(true)
     setShowMoreMenu(false)
   }, [pipelineStages, stageData])
 
@@ -1111,6 +1119,7 @@ export default function EventDetailPage() {
     setDraftDeletedStages([])
     setStageLayoutError('')
     setDraggedStageId(null)
+    setShowStageEditorModal(false)
     setShowStageModal(false)
     setNewStageName('')
     setNewStageColor('#3b82f6')
@@ -1273,6 +1282,7 @@ export default function EventDetailPage() {
       setStageEditMode(false)
       setDraftStages([])
       setDraftDeletedStages([])
+      setShowStageEditorModal(false)
       setShowStageModal(false)
       setNewStageName('')
       setNewStageColor('#3b82f6')
@@ -1283,6 +1293,37 @@ export default function EventDetailPage() {
       setStageLayoutSaving(false)
     }
   }, [applyStageManagementResponse, draftDeletedStages, draftStages, eventId, stageLayoutSaving])
+
+  const moveDraftStageByOffset = useCallback((stageId: string, offset: number) => {
+    const active = activeDraftStages
+    const index = active.findIndex(stage => stage.id === stageId)
+    const target = active[index + offset]
+    if (!target) return
+    moveDraftStage(stageId, target.id)
+  }, [activeDraftStages, moveDraftStage])
+
+  const handleDuplicateEvent = useCallback(async () => {
+    if (duplicatingEvent) return
+    setDuplicatingEvent(true)
+    setShowMoreMenu(false)
+    try {
+      const res = await fetch(`/api/events/${eventId}/duplicate`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      })
+      const data = await res.json()
+      if (!data.success || !data.event?.id) {
+        alert(data.error || 'No se pudo duplicar el evento.')
+        return
+      }
+      router.push(`/dashboard/events/${data.event.id}`)
+    } catch (e) {
+      console.error('[DuplicateEvent]', e)
+      alert('No se pudo duplicar el evento.')
+    } finally {
+      setDuplicatingEvent(false)
+    }
+  }, [duplicatingEvent, eventId, router])
 
   // ─── Add Participants ────────────────────────────────────────────────────────
   const existingContactIds = useMemo(() => {
@@ -1591,32 +1632,45 @@ export default function EventDetailPage() {
     }
     setWhatsappPhone(cleanPhone)
     whatsappPhoneRef.current = cleanPhone
-    await fetchDevices()
-    const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${getToken()}` } })
-    const data = await res.json()
-    const connected = (data.devices || []).filter((d: Device) => d.status === 'connected')
-    if (connected.length === 1) {
-      handleDeviceSelectedForChat(connected[0], cleanPhone)
-    } else {
-      setDevices(connected)
-      setShowDeviceSelector(true)
-    }
+    try {
+      const resolution = await resolveWhatsAppChat(cleanPhone)
+      if (!resolution.success) {
+        alert(resolution.error || 'Error al resolver conversación')
+        return
+      }
+      setExistingChatForWA(resolution.chat || null)
+      setWhatsappHistoricalPhone(resolution.historical_phone || '')
+      if (resolution.mode === 'read_only' && resolution.chat) {
+        setInlineChatId(resolution.chat.id)
+        setInlineChat(resolution.chat)
+        setInlineChatDeviceId(resolution.chat.device_id || '')
+        setInlineChatReadOnly(true)
+        setShowInlineChat(true)
+        return
+      }
+      if (resolution.mode === 'open_direct' && resolution.devices[0]) {
+        await handleDeviceSelectedForChat(resolution.devices[0] as Device, cleanPhone)
+        return
+      }
+      if (resolution.mode === 'choose_device') {
+        setDevices(resolution.devices as Device[])
+        setShowDeviceSelector(true)
+        return
+      }
+      alert('No hay dispositivos conectados para enviar')
+    } catch { alert('Error de conexión') }
   }
 
   const handleDeviceSelectedForChat = async (device: Device, phone?: string) => {
     setShowDeviceSelector(false)
+    setInlineChatReadOnly(false)
     const cleanPhone = (phone || whatsappPhoneRef.current || whatsappPhone).replace(/[^0-9]/g, '')
     if (!cleanPhone) {
       alert('No hay número seleccionado para abrir el chat')
       return
     }
     try {
-      const res = await fetch('/api/chats/new', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ device_id: device.id, phone: cleanPhone }),
-      })
-      const data = await res.json()
+      const data = await createWhatsAppChat(device.id, cleanPhone)
       if (data.success && data.chat) {
         setInlineChatId(data.chat.id)
         setInlineChat(data.chat)
@@ -2126,6 +2180,7 @@ export default function EventDetailPage() {
       if (showInlineChat) { setShowInlineChat(false); return }
       if (showCampaignModal) { setShowCampaignModal(false); return }
       if (showAddModal) { setShowAddModal(false); return }
+      if (showStageEditorModal) { cancelStageEditMode(); return }
       if (showDetailPanel) { setShowDetailPanel(false); setShowInlineChat(false); return }
       // If in logbook mode, return to kanban view instead of leaving the event
       if (viewMode === 'logbook') { setViewMode('kanban'); setSelectedLogbook(null); return }
@@ -2134,7 +2189,7 @@ export default function EventDetailPage() {
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showGoogleSyncModal, pendingContact, showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showDetailPanel, viewMode, router, folderParam])
+  }, [showGoogleSyncModal, pendingContact, showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showStageEditorModal, cancelStageEditMode, showDetailPanel, viewMode, router, folderParam])
 
   // Close more menu on outside click
   useEffect(() => {
@@ -2774,6 +2829,15 @@ export default function EventDetailPage() {
                 Editar etapas
               </button>
 
+              <button
+                onClick={handleDuplicateEvent}
+                disabled={duplicatingEvent}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                {duplicatingEvent ? <Loader2 className="w-4 h-4 text-slate-400 animate-spin" /> : <Copy className="w-4 h-4 text-slate-400" />}
+                Duplicar evento
+              </button>
+
               <div className="my-1 border-t border-slate-100" />
 
               {/* 6. Exportar */}
@@ -2801,78 +2865,6 @@ export default function EventDetailPage() {
       {/* ═══ Kanban View ═══ */}
       {viewMode === 'kanban' && (
         <div className="flex-1 min-h-0 flex flex-col animate-view-enter">
-          {stageEditMode && (
-            <div className="shrink-0 border-y border-amber-200 bg-amber-50/90 px-4 py-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-amber-900">Editando etapas</p>
-                  <p className="text-xs text-amber-700">Los cambios se aplican recién al guardar.</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowStageModal(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-amber-200 text-sm font-medium text-amber-800 hover:bg-amber-100 transition"
-                  >
-                    <Plus className="w-4 h-4" />
-                    Etapa
-                  </button>
-                  <button
-                    onClick={cancelStageEditMode}
-                    disabled={stageLayoutSaving}
-                    className="px-3 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-white/70 transition disabled:opacity-50"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    onClick={saveStageLayout}
-                    disabled={!stageEditDirty || stageSaveBlocked || stageLayoutSaving}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {stageLayoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                    Guardar cambios
-                  </button>
-                </div>
-              </div>
-              {(draftDeletedStages.length > 0 || stageLayoutError) && (
-                <div className="mt-3 space-y-2">
-                  {draftDeletedStages.map(deletion => {
-                    const stageStillDeleted = draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew)
-                    if (!stageStillDeleted) return null
-                    const destinationStages = activeDraftStages.filter(stage => stage.id !== deletion.stageId && !stage.isNew)
-                    return (
-                      <div key={deletion.stageId} className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2">
-                        <Trash2 className="w-4 h-4 text-red-500" />
-                        <span className="text-sm text-slate-700">Eliminar <strong>{deletion.stageName}</strong></span>
-                        {deletion.totalCount > 0 && <span className="text-xs text-slate-500">{deletion.totalCount} contacto(s)</span>}
-                        <select
-                          value={deletion.moveToStageId}
-                          onChange={e => setDeletedStageDestination(deletion.stageId, e.target.value)}
-                          className="min-w-[180px] rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/30"
-                        >
-                          <option value="">Mover a...</option>
-                          {destinationStages.map(stage => (
-                            <option key={stage.id} value={stage.id}>{stage.name}</option>
-                          ))}
-                        </select>
-                        <button
-                          onClick={() => undoDeleteStage(deletion.stageId)}
-                          className="ml-auto px-2 py-1 text-xs font-medium text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md transition"
-                        >
-                          Deshacer
-                        </button>
-                      </div>
-                    )
-                  })}
-                  {stageLayoutError && (
-                    <div className="flex items-center gap-2 text-sm text-red-600">
-                      <AlertCircle className="w-4 h-4" />
-                      {stageLayoutError}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
           <div ref={topScrollRef} onScroll={handleTopScroll} className="overflow-x-auto kanban-scroll-top flex-shrink-0" style={{ height: 12 }}>
             <div style={{ width: `${kanbanColumnCount * 288}px`, height: 1 }} />
           </div>
@@ -3579,6 +3571,219 @@ export default function EventDetailPage() {
         </div>
       )}
 
+      {/* Stage Editor Modal */}
+      {showStageEditorModal && (
+        <div className="fixed inset-0 bg-slate-950/45 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[88vh] border border-slate-200 flex flex-col overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-950">Configurar etapas</h2>
+                <p className="text-sm text-slate-500 mt-0.5">{event?.name || 'Evento'}</p>
+              </div>
+              <button
+                onClick={cancelStageEditMode}
+                disabled={stageLayoutSaving}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-50"
+                aria-label="Cerrar"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="px-6 py-5 overflow-y-auto space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Nueva etapa</label>
+                    <input
+                      value={newStageName}
+                      onChange={e => setNewStageName(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') handleCreateStage() }}
+                      className="w-full bg-white border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none"
+                      placeholder="Ej: Seguimiento"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Color</label>
+                    <div className="flex flex-wrap gap-1.5 min-w-[200px]">
+                      {STAGE_COLOR_OPTIONS.map(color => (
+                        <button
+                          key={color}
+                          type="button"
+                          onClick={() => setNewStageColor(color)}
+                          className={`w-8 h-8 rounded-full border-2 transition ${newStageColor === color ? 'border-slate-900 scale-105 shadow-sm' : 'border-white hover:scale-105'}`}
+                          style={{ backgroundColor: color }}
+                          aria-label={`Color ${color}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={handleCreateStage}
+                  disabled={!newStageName.trim() || stageLayoutSaving}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Plus className="w-4 h-4" />
+                  Crear etapa
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                {activeDraftStages.map((stage, idx) => (
+                  <div
+                    key={stage.id}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.effectAllowed = 'move'
+                      e.dataTransfer.setData('application/x-event-stage', stage.id)
+                      setDraggedStageId(stage.id)
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      e.dataTransfer.dropEffect = 'move'
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      const sourceId = draggedStageId || e.dataTransfer.getData('application/x-event-stage')
+                      if (sourceId) moveDraftStage(sourceId, stage.id)
+                      setDraggedStageId(null)
+                    }}
+                    onDragEnd={() => setDraggedStageId(null)}
+                    className={`rounded-xl border bg-white p-3 transition ${draggedStageId === stage.id ? 'border-emerald-300 opacity-60' : 'border-slate-200'}`}
+                  >
+                    <div className="grid grid-cols-[auto_1fr_auto] gap-3 items-center">
+                      <div className="flex items-center gap-2">
+                        <GripVertical className="w-4 h-4 text-slate-300 cursor-grab" />
+                        <span className="w-7 h-7 rounded-lg bg-slate-100 text-slate-500 text-xs font-semibold flex items-center justify-center tabular-nums">{idx + 1}</span>
+                      </div>
+                      <div className="min-w-0">
+                        <input
+                          value={stage.name}
+                          onChange={e => handleRenameStage(stage.id, e.target.value)}
+                          className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                        />
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          {STAGE_COLOR_OPTIONS.map(color => (
+                            <button
+                              key={color}
+                              type="button"
+                              onClick={() => handleColorStage(stage.id, color)}
+                              className={`w-6 h-6 rounded-full border-2 transition ${stage.color === color ? 'border-slate-900 scale-110' : 'border-white hover:scale-105'}`}
+                              style={{ backgroundColor: color }}
+                              aria-label={`Color ${color}`}
+                            />
+                          ))}
+                          {stage.total_count > 0 && (
+                            <span className="ml-2 text-xs text-slate-500">{stage.total_count} participante{stage.total_count !== 1 ? 's' : ''}</span>
+                          )}
+                          {stage.isNew && <span className="text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">Nueva</span>}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => moveDraftStageByOffset(stage.id, -1)}
+                          disabled={idx === 0}
+                          className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-30"
+                          aria-label="Subir etapa"
+                        >
+                          <ArrowUp className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveDraftStageByOffset(stage.id, 1)}
+                          disabled={idx === activeDraftStages.length - 1}
+                          className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-30"
+                          aria-label="Bajar etapa"
+                        >
+                          <ArrowDown className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteStage(stage.id, stage.name, stage.total_count)}
+                          disabled={activeDraftStages.length <= 1}
+                          className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition disabled:opacity-30"
+                          aria-label="Eliminar etapa"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {(draftDeletedStages.length > 0 || stageLayoutError) && (
+                <div className="space-y-2">
+                  {draftDeletedStages.map(deletion => {
+                    const stageStillDeleted = draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew)
+                    if (!stageStillDeleted) return null
+                    const destinationStages = activeDraftStages.filter(stage => stage.id !== deletion.stageId && !stage.isNew)
+                    return (
+                      <div key={deletion.stageId} className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <Trash2 className="w-4 h-4 text-red-500" />
+                          <div className="min-w-[180px] flex-1">
+                            <p className="text-sm font-medium text-slate-800">Eliminar {deletion.stageName}</p>
+                            <p className="text-xs text-slate-500">
+                              {deletion.totalCount > 0 ? `${deletion.totalCount} participante${deletion.totalCount !== 1 ? 's' : ''} se moverán a otra etapa.` : 'Esta etapa no tiene participantes.'}
+                            </p>
+                          </div>
+                          <select
+                            value={deletion.moveToStageId}
+                            onChange={e => setDeletedStageDestination(deletion.stageId, e.target.value)}
+                            className="min-w-[220px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/30"
+                          >
+                            <option value="">Mover a...</option>
+                            {destinationStages.map(stage => (
+                              <option key={stage.id} value={stage.id}>{stage.name}</option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => undoDeleteStage(deletion.stageId)}
+                            className="px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-white rounded-lg transition"
+                          >
+                            Deshacer
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                  {stageLayoutError && (
+                    <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                      <AlertCircle className="w-4 h-4" />
+                      {stageLayoutError}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-slate-100 flex flex-wrap justify-between gap-3 bg-white">
+              <p className="text-xs text-slate-500 self-center">Los cambios se aplican recién al guardar.</p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={cancelStageEditMode}
+                  disabled={stageLayoutSaving}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={saveStageLayout}
+                  disabled={!stageEditDirty || stageSaveBlocked || stageLayoutSaving}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {stageLayoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  Guardar cambios
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stage Modal */}
       {showStageModal && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setShowStageModal(false)}>
@@ -3820,6 +4025,7 @@ export default function EventDetailPage() {
                   chatId={inlineChatId}
                   deviceId={inlineChatDeviceId}
                   initialChat={inlineChat || undefined}
+                  readOnly={inlineChatReadOnly}
                   onClose={() => setShowInlineChat(false)}
                   className="h-full"
                 />
@@ -4344,6 +4550,11 @@ export default function EventDetailPage() {
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
             <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
             <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para el chat con {whatsappPhone}</p>
+            {existingChatForWA && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
+                Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
+              </p>
+            )}
             {devices.length === 0 ? (
               <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
@@ -4353,9 +4564,12 @@ export default function EventDetailPage() {
                     className="w-full flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
                   >
                     <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center"><Phone className="w-4 h-4 text-emerald-600" /></div>
-                    <div>
-                      <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                      <p className="text-xs text-slate-500">{device.phone_number || ''}</p>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${relationClassName(device)}`}>{relationLabel(device)}</span>
+                      </div>
+                      <p className="text-xs text-slate-500">{deviceDisplayPhone(device)}</p>
                     </div>
                   </button>
                 ))}

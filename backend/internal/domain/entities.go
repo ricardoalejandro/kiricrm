@@ -394,6 +394,7 @@ type ContactFilter struct {
 	TagMode            string      // OR or AND
 	MatchingContactIDs []uuid.UUID // pre-computed from formula
 	CfFilterContactIDs []uuid.UUID // pre-computed from custom field filters
+	WithoutActiveLead  bool
 	DateField          string
 	DateFrom           string
 	DateTo             string

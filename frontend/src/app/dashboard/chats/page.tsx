@@ -629,13 +629,14 @@ export default function ChatsPage() {
       {/* Main Chat Panel */}
       <div className="flex-1 flex flex-col min-h-0 bg-slate-50/50 relative overflow-hidden">
         {selectedChat ? (
-            <ChatPanel
-                chatId={selectedChat.id}
-                deviceId={selectedChat.device_id || devices[0]?.id || ''}
-                initialChat={selectedChat}
-                onClose={() => { setSelectedChat(null); setShowContactInfo(false) }}
-                {...(isMdScreen ? { onContactInfoToggle: setShowContactInfo, contactInfoOpen: showContactInfo } : {})}
-            />
+	            <ChatPanel
+	                chatId={selectedChat.id}
+	                deviceId={selectedChat.device_id || ''}
+	                initialChat={selectedChat}
+	                readOnly={!selectedChat.device_id}
+	                onClose={() => { setSelectedChat(null); setShowContactInfo(false) }}
+	                {...(isMdScreen ? { onContactInfoToggle: setShowContactInfo, contactInfoOpen: showContactInfo } : {})}
+	            />
         ) : (
             <div className="flex-1 flex flex-col items-center justify-center p-8 text-slate-400">
                 <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">

@@ -15,6 +15,7 @@ import (
 	"github.com/naperu/clarin/internal/ws"
 	"github.com/naperu/clarin/pkg/cache"
 )
+
 const (
 	autoWorkerCount  = 50  // global goroutine pool size
 	autoQueueBuffer  = 500 // buffered job channel
@@ -437,6 +438,9 @@ func (s *AutomationService) execSendWhatsApp(ctx context.Context, exec *domain.A
 	if err != nil || lead == nil {
 		return fmt.Errorf("lead not found")
 	}
+	if lead.AccountID != exec.AccountID {
+		return fmt.Errorf("lead does not belong to automation account")
+	}
 	if lead.JID == "" || strings.HasPrefix(lead.JID, "manual_") {
 		return fmt.Errorf("lead has no phone number for whatsapp")
 	}
@@ -445,6 +449,16 @@ func (s *AutomationService) execSendWhatsApp(ctx context.Context, exec *domain.A
 	deviceID, err := uuid.Parse(deviceIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid device_id")
+	}
+	device, err := s.repos.Device.GetByID(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	if device == nil || device.AccountID != exec.AccountID {
+		return fmt.Errorf("device not found for automation account")
+	}
+	if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
+		return fmt.Errorf("cloud api device cannot send automation whatsapp yet")
 	}
 
 	// Send message via device pool

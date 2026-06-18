@@ -8,6 +8,7 @@ import {
   Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid
 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher';
 import { Program, ProgramParticipant, ProgramSession, ProgramAttendance } from '@/types/program';
 import { Chat } from '@/types/chat';
 import { Contact } from '@/types/contact';
@@ -25,7 +26,11 @@ interface Device {
   name: string;
   phone: string | null;
   phone_number?: string;
+  jid?: string | null;
   status: string;
+  normalized_phone?: string;
+  historical_relation?: WhatsAppDeviceOption['historical_relation'];
+  matches_historical?: boolean;
 }
 
 const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
@@ -170,8 +175,11 @@ export default function ProgramDetailPage() {
   const [inlineChatId, setInlineChatId] = useState('');
   const [inlineChat, setInlineChat] = useState<Chat | null>(null);
   const [inlineChatDeviceId, setInlineChatDeviceId] = useState('');
+  const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false);
   const [showDeviceSelector, setShowDeviceSelector] = useState(false);
   const [whatsappPhone, setWhatsappPhone] = useState('');
+  const [existingChatForWA, setExistingChatForWA] = useState<Chat | null>(null);
+  const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('');
 
   // Generate sessions form
   const [genForm, setGenForm] = useState({
@@ -421,31 +429,42 @@ export default function ProgramDetailPage() {
   // WhatsApp chat
   const handleSendWhatsApp = async (phone: string) => {
     setWhatsappPhone(phone);
-    const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${token()}` } });
-    const data = await res.json();
-    const connected = (data.devices || []).filter((d: Device) => d.status === 'connected');
-    if (connected.length === 0) {
-      alert('No hay dispositivos conectados');
-      return;
-    }
-    if (connected.length === 1) {
-      handleDeviceSelectedForChat(connected[0], phone);
-    } else {
-      setDevices(connected);
-      setShowDeviceSelector(true);
+    try {
+      const resolution = await resolveWhatsAppChat(phone);
+      if (!resolution.success) {
+        alert(resolution.error || 'Error al resolver conversación');
+        return;
+      }
+      setExistingChatForWA(resolution.chat || null);
+      setWhatsappHistoricalPhone(resolution.historical_phone || '');
+      if (resolution.mode === 'read_only' && resolution.chat) {
+        setInlineChatId(resolution.chat.id);
+        setInlineChat(resolution.chat);
+        setInlineChatDeviceId(resolution.chat.device_id || '');
+        setInlineChatReadOnly(true);
+        setShowInlineChat(true);
+        return;
+      }
+      if (resolution.mode === 'open_direct' && resolution.devices[0]) {
+        await handleDeviceSelectedForChat(resolution.devices[0] as Device, phone);
+        return;
+      }
+      if (resolution.mode === 'choose_device') {
+        setDevices(resolution.devices as Device[]);
+        setShowDeviceSelector(true);
+        return;
+      }
+      alert('No hay dispositivos conectados para enviar');
+    } catch {
+      alert('Error de conexión');
     }
   };
 
   const handleDeviceSelectedForChat = async (device: Device, phone?: string) => {
     setShowDeviceSelector(false);
-    const cleanPhone = (phone || whatsappPhone).replace(/[^0-9]/g, '');
+    setInlineChatReadOnly(false);
     try {
-      const res = await fetch('/api/chats/new', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
-        body: JSON.stringify({ device_id: device.id, phone: cleanPhone }),
-      });
-      const data = await res.json();
+      const data = await createWhatsAppChat(device.id, phone || whatsappPhone);
       if (data.success && data.chat) {
         setInlineChatId(data.chat.id);
         setInlineChat(data.chat);
@@ -2145,6 +2164,7 @@ export default function ProgramDetailPage() {
                   chatId={inlineChatId}
                   deviceId={inlineChatDeviceId}
                   initialChat={inlineChat || undefined}
+                  readOnly={inlineChatReadOnly}
                   onClose={() => setShowInlineChat(false)}
                   className="h-full"
                 />
@@ -2188,6 +2208,11 @@ export default function ProgramDetailPage() {
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
             <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
             <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para el chat con {whatsappPhone}</p>
+            {existingChatForWA && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
+                Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
+              </p>
+            )}
             {devices.length === 0 ? (
               <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
@@ -2197,9 +2222,12 @@ export default function ProgramDetailPage() {
                     className="w-full flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
                   >
                     <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center"><Phone className="w-4 h-4 text-emerald-600" /></div>
-                    <div>
-                      <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                      <p className="text-xs text-slate-500">{device.phone_number || device.phone || ''}</p>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${relationClassName(device)}`}>{relationLabel(device)}</span>
+                      </div>
+                      <p className="text-xs text-slate-500">{deviceDisplayPhone(device)}</p>
                     </div>
                   </button>
                 ))}

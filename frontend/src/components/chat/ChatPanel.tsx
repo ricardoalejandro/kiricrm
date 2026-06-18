@@ -5,7 +5,7 @@ import {
   Send, Paperclip, MoreVertical, Search, Phone, Video,
   ArrowLeft, Smile, Image as ImageIcon, FileText, X,
   Mic, Trash2, Reply, Check, CheckCheck, Download,
-  CornerUpRight, Play, Pause, AlertCircle, BarChart3, User, EyeOff, RefreshCw
+  CornerUpRight, Play, Pause, AlertCircle, User, EyeOff, RefreshCw
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -17,7 +17,6 @@ import ImageViewer from './ImageViewer'
 import MessageBubble from './MessageBubble'
 import StickerPicker from './StickerPicker'
 import EmojiPicker from './EmojiPicker'
-import PollModal from './PollModal'
 import ContactPanel from './ContactPanel'
 import ForwardMessageModal from './ForwardMessageModal'
 import QuickReplyPicker from './QuickReplyPicker'
@@ -61,17 +60,9 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const [pendingMedia, setPendingMedia] = useState<{ file: File; type: string; previewUrl: string } | null>(null)
   const [mediaCaption, setMediaCaption] = useState('')
 
-  // Audio recording
-  const [isRecording, setIsRecording] = useState(false)
-  const [recordingDuration, setRecordingDuration] = useState(0)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const audioChunksRef = useRef<Blob[]>([])
-  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null)
-
   // Modals & Viewers
   const [viewImage, setViewImage] = useState<string | null>(null)
   const [activePopup, setActivePopup] = useState<'emoji' | 'sticker' | null>(null)
-  const [showPollModal, setShowPollModal] = useState(false)
 
   // Panels
   const [showContactInfoLocal, setShowContactInfoLocal] = useState(false)
@@ -120,6 +111,17 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     })
   }, [cacheMessages, chatId])
 
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<WhatsAppTextInputHandle>(null)
+  const captionInputRef = useRef<WhatsAppTextInputHandle>(null)
+  const optimisticIdRef = useRef(0)
+  const previousChatIdRef = useRef<string | null>(chatId)
+  const pendingMediaRef = useRef<typeof pendingMedia>(pendingMedia)
+
+  useEffect(() => {
+    pendingMediaRef.current = pendingMedia
+  }, [pendingMedia])
+
   // Helper: send typing/composing presence to recipient
   const sendPresence = useCallback((composing: boolean, media: string = '') => {
     if (!chat || !deviceId) return
@@ -130,6 +132,30 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       body: JSON.stringify({ device_id: deviceId, to: chat.jid, composing, media })
     }).catch(() => {})
   }, [chat, deviceId])
+
+  useEffect(() => {
+    if (previousChatIdRef.current === chatId) return
+    previousChatIdRef.current = chatId
+
+    if (typingPauseTimeoutRef.current) clearTimeout(typingPauseTimeoutRef.current)
+    if (pendingMediaRef.current?.previewUrl) {
+      URL.revokeObjectURL(pendingMediaRef.current.previewUrl)
+    }
+
+    sendPresence(false)
+    lastTypingSentRef.current = 0
+    setMessageText('')
+    setReplyingTo(null)
+    setEditingMsg(null)
+    setShowQuickReply(false)
+    setQuickReplyFilter('')
+    setActivePopup(null)
+    setShowAttachments(false)
+    setPendingMedia(null)
+    setMediaCaption('')
+    inputRef.current?.clear()
+    captionInputRef.current?.clear()
+  }, [chatId, sendPresence])
 
   // Request history sync for current chat
   const handleRequestHistorySync = useCallback(async () => {
@@ -155,11 +181,6 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
   // Resize
   const [rightPanelWidth, setRightPanelWidth] = useState(320)
-
-  const messagesContainerRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<WhatsAppTextInputHandle>(null)
-  const captionInputRef = useRef<WhatsAppTextInputHandle>(null)
-  const optimisticIdRef = useRef(0)
 
   // Fetch quick replies
   useEffect(() => {
@@ -811,28 +832,28 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       })
   }
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, pickerType: 'media' | 'document') => {
      if (e.target.files && e.target.files.length > 0) {
          const file = e.target.files[0]
-         const type = file.type.startsWith('image/') ? 'image' :
-                      file.type.startsWith('video/') ? 'video' :
-                      file.type.startsWith('audio/') ? 'audio' : 'document'
+         const type = pickerType === 'document'
+           ? 'document'
+           : file.type.startsWith('video/')
+             ? 'video'
+             : 'image'
+
          // Video size limit: 15 MB (like WhatsApp)
          if (type === 'video' && file.size > 15 * 1024 * 1024) {
            alert('El video es demasiado grande. Máximo 15 MB.')
            if (e.target) e.target.value = ''
            return
          }
-         if (type === 'image' || type === 'video' || type === 'document') {
-           const previewUrl = type !== 'document' ? URL.createObjectURL(file) : ''
-           setPendingMedia({ file, type, previewUrl })
-           setMediaCaption('')
-           captionInputRef.current?.clear()
-           setShowAttachments(false)
-           setTimeout(() => captionInputRef.current?.focus(), 100)
-         } else {
-           handleSendMedia(file, type)
-         }
+
+         const previewUrl = type !== 'document' ? URL.createObjectURL(file) : ''
+         setPendingMedia({ file, type, previewUrl })
+         setMediaCaption('')
+         captionInputRef.current?.clear()
+         setShowAttachments(false)
+         setTimeout(() => captionInputRef.current?.focus(), 100)
      }
      // Reset input so same file can be selected again
      if (e.target) e.target.value = ''
@@ -901,67 +922,6 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       setMediaCaption('')
       captionInputRef.current?.clear()
     }
-  }
-
-  const startRecording = async () => {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        const recorder = new MediaRecorder(stream)
-        mediaRecorderRef.current = recorder
-        audioChunksRef.current = []
-
-        recorder.ondataavailable = (e) => {
-            if (e.data.size > 0) audioChunksRef.current.push(e.data)
-        }
-
-        recorder.start()
-        setIsRecording(true)
-        setRecordingDuration(0)
-
-        recordingTimerRef.current = setInterval(() => {
-            setRecordingDuration(prev => prev + 1)
-        }, 1000)
-
-        // Send recording audio indicator
-        sendPresence(true, 'audio')
-
-    } catch (e) {
-        console.error('Mic error', e)
-        alert('No se pudo acceder al micrófono')
-    }
-  }
-
-  const stopRecording = () => {
-     if (mediaRecorderRef.current && isRecording) {
-         mediaRecorderRef.current.onstop = () => {
-             const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
-             const file = new File([blob], 'voice_note.webm', { type: 'audio/webm' })
-             handleSendMedia(file, 'audio')
-         }
-         mediaRecorderRef.current.stop()
-         mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop())
-     }
-     setIsRecording(false)
-     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
-     // Stop recording presence
-     sendPresence(false, 'audio')
-  }
-
-  const cancelRecording = () => {
-      if (mediaRecorderRef.current && isRecording) {
-          mediaRecorderRef.current.stop()
-          mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop())
-      }
-      setIsRecording(false)
-      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
-      // Stop recording presence
-      sendPresence(false, 'audio')
-  }
-
-  const formatTime = (seconds: number) => {
-      const mins = Math.floor(seconds / 60)
-      const secs = seconds % 60
-      return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1397,8 +1357,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                       </button>
                   </div>
               )}
-              <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={handleFileSelect} />
-              <input type="file" ref={docFileInputRef} className="hidden" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar" onChange={handleFileSelect} />
+              <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={e => handleFileSelect(e, 'media')} />
+              <input type="file" ref={docFileInputRef} className="hidden" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar" onChange={e => handleFileSelect(e, 'document')} />
 
               <div className="flex gap-1 pb-1">
                   <button onClick={() => setShowAttachments(!showAttachments)} className="p-2 text-slate-500 hover:text-emerald-600 transition">
@@ -1415,13 +1375,6 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                       isOpen={activePopup === 'sticker'}
                       onToggle={() => setActivePopup(activePopup === 'sticker' ? null : 'sticker')}
                   />
-                  <button
-                      onClick={() => setShowPollModal(true)}
-                      className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-slate-100 rounded-lg transition-colors"
-                      title="Crear encuesta"
-                  >
-                      <BarChart3 className="w-5 h-5" />
-                  </button>
               </div>
 
               <div className="flex-1 relative">
@@ -1442,7 +1395,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                     />
               </div>
 
-              {messageText || forwardingMsg ? (
+              {(messageText || forwardingMsg) && (
                   <button
                     onClick={handleSendMessage}
                     disabled={sendingMessage}
@@ -1450,29 +1403,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                   >
                       <Send className="w-5 h-5" />
                   </button>
-              ) : (
-                  <button
-                    onMouseDown={startRecording}
-                    onMouseUp={stopRecording}
-                    onMouseLeave={cancelRecording}
-                    className={`p-3 rounded-full transition shadow-md ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}
-                  >
-                      {isRecording ? <div className="w-5 h-5 flex items-center justify-center font-mono text-xs">{formatTime(recordingDuration)}</div> : <Mic className="w-5 h-5" />}
-                  </button>
               )}
          </div>
-         )}
-
-         {/* Poll Modal */}
-         {showPollModal && (
-             <PollModal
-               onClose={() => setShowPollModal(false)}
-               onSend={(question, options, maxSelections) => {
-                  console.log('Poll:', question, options, maxSelections)
-                  // Implement poll sending logic here via API if available
-                  setShowPollModal(false)
-               }}
-             />
          )}
 
          {/* Image Viewer */}

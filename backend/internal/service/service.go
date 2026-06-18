@@ -1919,6 +1919,10 @@ func (s *EventService) Create(ctx context.Context, event *domain.Event) error {
 	return s.repos.Event.Create(ctx, event)
 }
 
+func (s *EventService) DuplicateWithStageConfig(ctx context.Context, sourceID, accountID uuid.UUID, createdBy *uuid.UUID) (*domain.Event, error) {
+	return s.repos.Event.DuplicateWithStageConfig(ctx, sourceID, accountID, createdBy)
+}
+
 func (s *EventService) GetByAccountID(ctx context.Context, accountID uuid.UUID, filter domain.EventFilter) ([]*domain.Event, int, error) {
 	return s.repos.Event.GetByAccountID(ctx, accountID, filter)
 }

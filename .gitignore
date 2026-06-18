@@ -58,6 +58,7 @@ temp/
 # Go
 /backend/clarin
 kommo_export_leads_2026-02-14.csv
+difusion_moquegua_chats.csv
 backups/*.sql
 
 # Playwright

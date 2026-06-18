@@ -77,6 +77,8 @@ interface ContactSelectorProps {
   sourceFilter?: 'contact' | 'lead'
   /** Enable advanced filter panel (device, date, tag include/exclude, formula) */
   advancedFilters?: boolean
+  /** When selecting contacts, only show contacts without an active lead */
+  withoutActiveLead?: boolean
 }
 
 export default function ContactSelector({
@@ -89,6 +91,7 @@ export default function ContactSelector({
   excludeIds,
   sourceFilter,
   advancedFilters = false,
+  withoutActiveLead = false,
 }: ContactSelectorProps) {
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -232,6 +235,7 @@ export default function ContactSelector({
 
         params.set('limit', '100')
         params.set('has_phone', 'false')
+        if (withoutActiveLead) params.set('without_active_lead', 'true')
 
         const res = await fetch(`/api/contacts?${params}`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -276,7 +280,7 @@ export default function ContactSelector({
         }
       }
     } catch (e) { console.error(e) } finally { setLoading(false) }
-  }, [debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo])
+  }, [debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
 
   const toggleSelect = (person: PersonResult) => {
     const next = new Map(selected)

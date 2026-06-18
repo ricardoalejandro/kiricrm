@@ -6,7 +6,7 @@ import {
   CalendarDays, Plus, Search, MapPin, Users, Clock, Edit2, Trash2,
   Eye, LayoutGrid, List, ChevronRight, Home, FolderPlus, MoreHorizontal,
   LayoutTemplate, FolderOpen, ArrowLeft, MoveRight, Tag, X, ChevronDown, Check,
-  Code, FileText, AlertCircle, CheckCircle2,
+  Code, FileText, AlertCircle, CheckCircle2, Copy,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -187,6 +187,7 @@ export default function EventsPage() {
   // Event context menus
   const [menuEventID, setMenuEventID] = useState<string | null>(null)
   const [showMoveMenu, setShowMoveMenu] = useState<string | null>(null)
+  const [duplicatingEventID, setDuplicatingEventID] = useState<string | null>(null)
 
   // Drag & drop
   const [dragOverFolderID, setDragOverFolderID] = useState<string | null>(null)
@@ -601,6 +602,28 @@ export default function EventsPage() {
     })
     fetchEvents()
     fetchFolders()
+  }
+
+  const handleDuplicateEvent = async (id: string) => {
+    if (duplicatingEventID) return
+    setDuplicatingEventID(id)
+    try {
+      const res = await fetch(`/api/events/${id}/duplicate`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (!data.success || !data.event?.id) {
+        alert(data.error || 'No se pudo duplicar el evento')
+        return
+      }
+      router.push(`/dashboard/events/${data.event.id}`)
+    } catch (e) {
+      console.error('Failed to duplicate event:', e)
+      alert('No se pudo duplicar el evento')
+    } finally {
+      setDuplicatingEventID(null)
+    }
   }
 
   // ─── Folder CRUD ────────────────────────────────────────────────────────────
@@ -1327,6 +1350,14 @@ export default function EventsPage() {
                           className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
                           <Edit2 className="w-4 h-4" />
                         </button>
+                        <button
+                          onClick={e => { e.stopPropagation(); handleDuplicateEvent(ev.id) }}
+                          disabled={duplicatingEventID === ev.id}
+                          className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
+                          title="Duplicar"
+                        >
+                          <Copy className="w-4 h-4" />
+                        </button>
                         <button onClick={e => { e.stopPropagation(); handleDeleteEvent(ev.id) }}
                           className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors">
                           <Trash2 className="w-4 h-4" />
@@ -1355,6 +1386,14 @@ export default function EventsPage() {
                     <button onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
                       className="opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded">
                       <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={e => { e.stopPropagation(); handleDuplicateEvent(ev.id) }}
+                      disabled={duplicatingEventID === ev.id}
+                      className="opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded disabled:opacity-50"
+                      title="Duplicar"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
                     </button>
                   </div>
                   {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) && (
@@ -1416,6 +1455,13 @@ export default function EventsPage() {
                             <button onClick={() => { openEditEvent(ev); setMenuEventID(null) }}
                               className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                               <Edit2 className="w-3.5 h-3.5" /> Editar
+                            </button>
+                            <button
+                              onClick={() => { handleDuplicateEvent(ev.id); setMenuEventID(null) }}
+                              disabled={duplicatingEventID === ev.id}
+                              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              <Copy className="w-3.5 h-3.5" /> Duplicar
                             </button>
                             <div className="border-t border-slate-100 my-1" />
                             <p className="px-3 py-1 text-xs font-semibold text-slate-400 uppercase">Mover a</p>
