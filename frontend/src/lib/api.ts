@@ -1,7 +1,21 @@
-// API helper for Clarin frontend
+// API helper for Kiri CRM frontend
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
+const RAW_API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
 const SESSION_MARKER = 'cookie-session'
+
+function apiBase() {
+  if (typeof window === 'undefined') return RAW_API_BASE
+  if (!RAW_API_BASE) return ''
+  try {
+    const url = new URL(RAW_API_BASE)
+    const localApiHost = ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)
+    const localBrowserHost = ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname)
+    if (localApiHost && !localBrowserHost) return ''
+  } catch {
+    return RAW_API_BASE
+  }
+  return RAW_API_BASE
+}
 
 // ─── Token Refresh ────────────────────────────────────────────────────────────
 // Transparently refreshes the JWT when it expires (401), using the httpOnly
@@ -13,9 +27,9 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000
 const ACTIVITY_THROTTLE_MS = 15 * 1000
 const ACCESS_TOKEN_REFRESH_MS = 20 * 60 * 1000
-const LAST_ACTIVITY_KEY = 'clarin:last_activity_at'
-const LOGOUT_EVENT_KEY = 'clarin:logout_at'
-const AUTH_REFRESHED_KEY = 'clarin:auth_refreshed_at'
+const LAST_ACTIVITY_KEY = 'kiricrm:last_activity_at'
+const LOGOUT_EVENT_KEY = 'kiricrm:logout_at'
+const AUTH_REFRESHED_KEY = 'kiricrm:auth_refreshed_at'
 
 export function clearAuthState() {
   if (typeof window === 'undefined') return
@@ -51,7 +65,7 @@ export async function logoutFromBrowser(reason: 'manual' | 'idle' | 'expired' = 
   if (typeof window === 'undefined') return
   clearIdleTimeout()
   try {
-    await fetch(`${API_BASE}/api/auth/logout`, {
+    await fetch(`${apiBase()}/api/auth/logout`, {
       method: 'POST',
       credentials: 'include',
     })
@@ -73,7 +87,7 @@ export async function tryRefreshToken(): Promise<boolean> {
 
   _refreshPromise = (async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+      const res = await fetch(`${apiBase()}/api/auth/refresh`, {
         method: 'POST',
         credentials: 'include', // sends httpOnly refresh-token cookie
       })
@@ -148,7 +162,7 @@ async function sendActivityHeartbeat() {
     return
   }
   try {
-    const res = await fetch(`${API_BASE}/api/auth/activity`, {
+    const res = await fetch(`${apiBase()}/api/auth/activity`, {
       method: 'POST',
       credentials: 'include',
     })
@@ -200,7 +214,7 @@ export function clearIdleTimeout() {
 }
 
 // ─── Version Detection ────────────────────────────────────────────────────────
-// Tracks server version from X-Clarin-Version header and notifies listeners
+// Tracks server version from X-Kiri CRM-Version header and notifies listeners
 let _latestServerVersion: string | null = null
 const _versionListeners = new Set<(version: string) => void>()
 
@@ -214,7 +228,7 @@ export function onServerVersionChange(cb: (version: string) => void): () => void
 }
 
 function checkVersionHeader(res: Response) {
-  const serverVersion = res.headers.get('x-clarin-version')
+  const serverVersion = res.headers.get('x-kiricrm-version')
   if (serverVersion && serverVersion !== _latestServerVersion) {
     _latestServerVersion = serverVersion
     _versionListeners.forEach(cb => {
@@ -252,7 +266,7 @@ export async function api<T>(
   }
 
   try {
-    const res = await fetch(`${API_BASE}${endpoint}`, {
+    const res = await fetch(`${apiBase()}${endpoint}`, {
       ...fetchOptions,
       headers,
       credentials: fetchOptions.credentials ?? 'include',
@@ -280,7 +294,7 @@ export async function api<T>(
       if (res.status === 401 && typeof window !== 'undefined' && !skipAuth) {
         const refreshed = await tryRefreshToken()
         if (refreshed) {
-          const retryRes = await fetch(`${API_BASE}${endpoint}`, {
+          const retryRes = await fetch(`${apiBase()}${endpoint}`, {
             ...fetchOptions,
             headers,
             credentials: fetchOptions.credentials ?? 'include',
@@ -321,6 +335,12 @@ export const apiPut = <T>(endpoint: string, body: unknown) =>
     body: JSON.stringify(body),
   })
 
+export const apiPatch = <T>(endpoint: string, body: unknown) =>
+  api<T>(endpoint, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+
 export const apiDelete = <T>(endpoint: string) =>
   api<T>(endpoint, { method: 'DELETE' })
 
@@ -331,7 +351,7 @@ export async function apiUpload<T = any>(endpoint: string, formData: FormData): 
   }
 
   const doFetch = async () => {
-    return fetch(`${API_BASE}${endpoint}`, {
+    return fetch(`${apiBase()}${endpoint}`, {
       method: 'POST',
       body: formData,
       credentials: 'include',
