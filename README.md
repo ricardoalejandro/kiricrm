@@ -15,12 +15,16 @@ reference. The first active implementation phase will be the backend.
 
 ## Backend
 
-The first backend slice is a local-only NestJS/Fastify API.
+The first backend slices are a NestJS/Fastify API with a dev token guard and a
+WhatsApp Cloud API backend foundation. Real WhatsApp sends are disabled by
+default.
 
 ```bash
 corepack enable
 corepack prepare pnpm@10.34.3 --activate
 pnpm install
+pnpm --filter @kiricrm/api db:generate
+pnpm --filter @kiricrm/api db:push
 pnpm run build
 pnpm run start:api:local
 ```
@@ -30,10 +34,36 @@ Local endpoints:
 ```text
 GET http://127.0.0.1:18080/health
 GET http://127.0.0.1:18080/api/hello
+GET http://127.0.0.1:18080/api/whatsapp/provider-status
+GET http://127.0.0.1:18080/api/whatsapp/overview
 ```
 
 `start:api:local` uses port `18080` because port `8080` may already be used by
 other services on the server.
+
+Protected API requests require:
+
+```text
+x-kiri-dev-token: <KIRI_DEV_API_TOKEN>
+```
+
+Meta webhook routes are public by design:
+
+```text
+GET  /api/webhooks/whatsapp
+POST /api/webhooks/whatsapp
+```
+
+The webhook verification uses `WA_WEBHOOK_VERIFY_TOKEN`. Webhook POST requests
+must include a valid `x-hub-signature-256` generated with
+`WA_WEBHOOK_APP_SECRET`.
+
+Keep these flags as `false` until real sends are explicitly approved:
+
+```text
+WA_SENDING_ENABLED=false
+WA_TEMPLATES_ENABLED=false
+```
 
 ## Package Security
 
@@ -52,8 +82,11 @@ Security defaults:
 - `trustPolicy` is set to `no-downgrade`.
 - `undici-types` is pinned through pnpm overrides because newer compatible
   patches lacked provenance evidence during the initial rebuild.
+- `chokidar` is pinned through pnpm overrides while Prisma depends on a newer
+  release that fails pnpm trust checks.
 - exotic dependency protocols are blocked.
-- dependency build scripts are denied unless explicitly approved.
+- dependency build scripts are denied unless explicitly approved; Prisma build
+  scripts are the only current approved exception.
 - use `pnpm audit --prod` before shipping backend changes.
 
 ## Reference

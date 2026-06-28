@@ -55,6 +55,10 @@ apps/api/
 - Keep `trustPolicy: no-downgrade` and `blockExoticSubdeps: true` enabled.
 - Keep the `undici-types` pnpm override pinned unless a newer version has
   equivalent provenance/attestation evidence and passes pnpm trust checks.
+- Keep the `chokidar` pnpm override pinned to the latest trusted version that
+  passes pnpm trust checks while Prisma depends on an untrusted newer release.
+- Keep the `effect` override/minimum-release-age exception only while it is
+  needed to patch the Prisma transitive advisory GHSA-38f7-945m-qr2g.
 - Avoid dev dependencies that require native installer scripts unless they are
   necessary for the current backend slice.
 - If a development API is exposed outside `127.0.0.1`, prefer a dedicated
@@ -90,11 +94,19 @@ apps/api/
 
 ## WhatsApp
 
-WhatsApp is not active in this phase.
+WhatsApp is backend-only in this phase.
 
-- `/api/devices` and `/api/chats` may return empty `coming_soon` responses.
-- Do not add whatsmeow, QR or WhatsApp Web behavior.
-- Future implementation should use WhatsApp Cloud API official webhooks and workers.
+- Use the official WhatsApp Cloud API only.
+- Do not add whatsmeow, QR pairing, browser automation or unofficial WhatsApp Web behavior.
+- Keep real outbound sends disabled unless the owner explicitly approves it.
+  `WA_SENDING_ENABLED=false` must block text replies even if a connection exists.
+- Keep real template submission disabled unless the owner explicitly approves it.
+  `WA_TEMPLATES_ENABLED=false` must block template submission to Meta.
+- Public Meta webhook routes must not require `x-kiri-dev-token`, but POST
+  webhook requests must verify `x-hub-signature-256` with
+  `WA_WEBHOOK_APP_SECRET`.
+- Store webhook events idempotently and never store or return raw access tokens.
+  WhatsApp access tokens must be encrypted with `WA_TOKEN_ENCRYPTION_KEY`.
 
 ## Prisma
 

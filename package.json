@@ -25,8 +25,15 @@
   },
   "pnpm": {
     "overrides": {
+      "chokidar": "4.0.1",
+      "effect": "3.20.1",
       "undici-types": "6.19.2"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma"
+    ]
   },
   "license": "UNLICENSED"
 }

@@ -2,6 +2,8 @@ packages:
   - apps/*
 
 minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - effect
 
 trustPolicy: no-downgrade
 blockExoticSubdeps: true

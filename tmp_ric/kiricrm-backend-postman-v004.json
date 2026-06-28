@@ -1,0 +1,519 @@
+{
+  "info": {
+    "_postman_id": "b5a7e5d5-8f39-4cdb-9ad6-2ed37fb83d44",
+    "name": "Kiri CRM Backend - v004 WhatsApp Cloud API",
+    "description": "Coleccion para probar el backend inicial de Kiri CRM y el primer corte de WhatsApp Cloud API oficial. No contiene secretos reales. Configura las variables antes de enviar requests protegidos.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://api-dev.kiricrm.com",
+      "type": "string",
+      "description": "URL base del backend. Para pruebas locales puedes usar http://127.0.0.1:18080."
+    },
+    {
+      "key": "dev_api_token",
+      "value": "",
+      "type": "secret",
+      "description": "Token privado para el header x-kiri-dev-token. Copiar desde tu entorno seguro, nunca guardarlo en git."
+    },
+    {
+      "key": "wa_verify_token",
+      "value": "",
+      "type": "secret",
+      "description": "Debe coincidir con WA_WEBHOOK_VERIFY_TOKEN para verificar el webhook en Meta."
+    },
+    {
+      "key": "wa_app_secret",
+      "value": "",
+      "type": "secret",
+      "description": "Meta App Secret usado solo por Postman para calcular x-hub-signature-256 en la prueba firmada."
+    },
+    {
+      "key": "wa_signature_sha256",
+      "value": "",
+      "type": "secret",
+      "description": "Se calcula automaticamente en la request 'Webhook firmado de ejemplo' si wa_app_secret tiene valor."
+    },
+    {
+      "key": "wa_phone_number_id",
+      "value": "test_phone_number_id",
+      "type": "string",
+      "description": "Phone Number ID de la conexion WhatsApp que quieres probar. Puede ser dummy para pruebas internas."
+    },
+    {
+      "key": "wa_waba_id",
+      "value": "test_waba_id",
+      "type": "string",
+      "description": "WhatsApp Business Account ID. Puede ser dummy si solo validas endpoints internos."
+    },
+    {
+      "key": "connection_id",
+      "value": "",
+      "type": "string",
+      "description": "ID devuelto por 'Crear conexion manual'."
+    },
+    {
+      "key": "conversation_id",
+      "value": "",
+      "type": "string",
+      "description": "ID de una conversacion creada por webhook inbound."
+    },
+    {
+      "key": "template_id",
+      "value": "",
+      "type": "string",
+      "description": "ID devuelto por 'Crear plantilla local'."
+    }
+  ],
+  "item": [
+    {
+      "name": "Sistema",
+      "description": "Endpoints base para comprobar que el backend esta vivo y que el token de desarrollo protege rutas internas.",
+      "item": [
+        {
+          "name": "Salud del servicio",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/health",
+            "description": "No requiere token. Sirve para confirmar que el servicio responde."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Responde 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Servicio OK', function () { pm.expect(pm.response.json().success).to.eql(true); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Hola mundo",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}",
+                "description": "Token privado del backend dev."
+              }
+            ],
+            "url": "{{base_url}}/api/hello",
+            "description": "Endpoint minimo protegido por x-kiri-dev-token."
+          }
+        },
+        {
+          "name": "Token faltante debe fallar",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/hello",
+            "description": "Prueba negativa: sin x-kiri-dev-token debe responder 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Sin token responde 401', function () { pm.response.to.have.status(401); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "WhatsApp - Proveedor",
+      "description": "Estado general de configuracion WhatsApp Cloud API en backend.",
+      "item": [
+        {
+          "name": "Estado del proveedor WhatsApp",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/provider-status",
+            "description": "Muestra URL de webhook, version Graph API y flags de seguridad. No revela secretos."
+          }
+        },
+        {
+          "name": "Resumen WhatsApp",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/overview",
+            "description": "Cuenta conexiones, eventos, conversaciones, mensajes y plantillas del account dev."
+          }
+        }
+      ]
+    },
+    {
+      "name": "WhatsApp - Conexiones",
+      "description": "Alta manual de una conexion Cloud API. Embedded Signup queda para una fase posterior.",
+      "item": [
+        {
+          "name": "Listar conexiones",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/connections",
+            "description": "Lista las conexiones registradas para el account dev."
+          }
+        },
+        {
+          "name": "Crear conexion manual",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Conexion dev manual\",\n  \"waba_id\": \"{{wa_waba_id}}\",\n  \"phone_number_id\": \"{{wa_phone_number_id}}\",\n  \"display_phone_number\": \"+51999999999\",\n  \"verified_name\": \"Kiri CRM Dev\",\n  \"sending_enabled\": false,\n  \"templates_enabled\": false,\n  \"capabilities\": {\n    \"origen\": \"postman\",\n    \"modo\": \"manual\"\n  }\n}"
+            },
+            "url": "{{base_url}}/api/whatsapp/connections/manual",
+            "description": "Crea o actualiza una conexion por account_id + phone_number_id. No requiere access_token para pruebas de webhook."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.connection && json.connection.id) {",
+                  "  pm.variables.set('connection_id', json.connection.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Actualizar conexion",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Conexion dev revisada\",\n  \"status\": \"ACTIVE\",\n  \"webhook_status\": \"verified\"\n}"
+            },
+            "url": "{{base_url}}/api/whatsapp/connections/{{connection_id}}",
+            "description": "Actualiza metadatos de una conexion. No permite activar envios reales si WA_SENDING_ENABLED=false."
+          }
+        },
+        {
+          "name": "Desconectar conexion",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/connections/{{connection_id}}",
+            "description": "Marca la conexion como DISCONNECTED y apaga flags de envio/plantillas."
+          }
+        }
+      ]
+    },
+    {
+      "name": "WhatsApp - Webhook Meta",
+      "description": "Endpoints publicos que Meta usara para verificar y enviar webhooks. El POST debe estar firmado.",
+      "item": [
+        {
+          "name": "Verificar webhook Meta",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token={{wa_verify_token}}&hub.challenge=kiricrm_challenge_ok",
+            "description": "Debe devolver exactamente el texto del challenge si wa_verify_token coincide con WA_WEBHOOK_VERIFY_TOKEN."
+          }
+        },
+        {
+          "name": "Webhook sin firma debe fallar",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"object\": \"whatsapp_business_account\",\n  \"entry\": []\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/whatsapp",
+            "description": "Prueba negativa: sin x-hub-signature-256 debe responder 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Sin firma responde 401', function () { pm.response.to.have.status(401); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Webhook firmado de ejemplo",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const secret = pm.variables.get('wa_app_secret');",
+                  "const rawBody = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "if (secret) {",
+                  "  const signature = 'sha256=' + CryptoJS.HmacSHA256(rawBody, secret).toString(CryptoJS.enc.Hex);",
+                  "  pm.variables.set('wa_signature_sha256', signature);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-hub-signature-256",
+                "value": "{{wa_signature_sha256}}",
+                "description": "Calculada por el prerequest script si wa_app_secret esta definido."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"object\": \"whatsapp_business_account\",\n  \"entry\": [\n    {\n      \"id\": \"{{wa_waba_id}}\",\n      \"changes\": [\n        {\n          \"field\": \"messages\",\n          \"value\": {\n            \"messaging_product\": \"whatsapp\",\n            \"metadata\": {\n              \"display_phone_number\": \"+51999999999\",\n              \"phone_number_id\": \"{{wa_phone_number_id}}\"\n            },\n            \"contacts\": [\n              {\n                \"profile\": { \"name\": \"Cliente Prueba\" },\n                \"wa_id\": \"51988887777\"\n              }\n            ],\n            \"messages\": [\n              {\n                \"from\": \"51988887777\",\n                \"id\": \"wamid.postman.001\",\n                \"timestamp\": \"1780000000\",\n                \"type\": \"text\",\n                \"text\": { \"body\": \"Hola desde Postman\" }\n              }\n            ]\n          }\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/whatsapp",
+            "description": "Simula un inbound firmado. Antes crea una conexion manual con el mismo wa_phone_number_id."
+          }
+        },
+        {
+          "name": "Listar eventos webhook",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/webhook-events?limit=50",
+            "description": "Permite revisar eventos recibidos, procesados, fallidos o ignorados."
+          }
+        }
+      ]
+    },
+    {
+      "name": "WhatsApp - Conversaciones",
+      "description": "Lectura de conversaciones creadas desde webhooks inbound y prueba de respuesta bloqueada.",
+      "item": [
+        {
+          "name": "Listar conversaciones",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/conversations?limit=50",
+            "description": "Lista conversaciones. Usa search, status o window=active/expired si necesitas filtrar."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.conversations && json.conversations[0] && json.conversations[0].id) {",
+                  "  pm.variables.set('conversation_id', json.conversations[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mensajes de conversacion",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/conversations/{{conversation_id}}/messages?limit=50",
+            "description": "Lee los mensajes de una conversacion creada por webhook."
+          }
+        },
+        {
+          "name": "Responder conversacion bloqueado por defecto",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Hola, esta respuesta debe quedar bloqueada mientras WA_SENDING_ENABLED=false.\"\n}"
+            },
+            "url": "{{base_url}}/api/whatsapp/conversations/{{conversation_id}}/reply",
+            "description": "Debe devolver success=false mientras el envio real siga deshabilitado."
+          }
+        }
+      ]
+    },
+    {
+      "name": "WhatsApp - Plantillas",
+      "description": "Plantillas locales y preparacion para sincronizar/enviar a Meta cuando se habilite explicitamente.",
+      "item": [
+        {
+          "name": "Listar plantillas",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/templates",
+            "description": "Lista plantillas locales/sincronizadas."
+          }
+        },
+        {
+          "name": "Crear plantilla local",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"connection_id\": \"{{connection_id}}\",\n  \"name\": \"recordatorio_cita_dev\",\n  \"category\": \"UTILITY\",\n  \"language\": \"es\",\n  \"body\": \"Hola {{1}}, te recordamos tu cita para {{2}}.\",\n  \"footer\": \"Kiri CRM\",\n  \"variables\": {\n    \"1\": \"nombre\",\n    \"2\": \"fecha\"\n  }\n}"
+            },
+            "url": "{{base_url}}/api/whatsapp/templates",
+            "description": "Guarda una plantilla local. No la envia a Meta."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.template && json.template.id) {",
+                  "  pm.variables.set('template_id', json.template.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sincronizar plantillas desde Meta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"connection_id\": \"{{connection_id}}\"\n}"
+            },
+            "url": "{{base_url}}/api/whatsapp/templates/sync",
+            "description": "Requiere access_token cifrado real en la conexion. Si no existe, debe devolver error controlado."
+          }
+        },
+        {
+          "name": "Enviar plantilla a Meta bloqueado por defecto",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-kiri-dev-token",
+                "value": "{{dev_api_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/whatsapp/templates/{{template_id}}/submit",
+            "description": "Debe devolver success=false mientras WA_TEMPLATES_ENABLED=false."
+          }
+        }
+      ]
+    }
+  ]
+}

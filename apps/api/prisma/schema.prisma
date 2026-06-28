@@ -1,0 +1,199 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WhatsAppConnectionStatus {
+  PENDING
+  ACTIVE
+  PAUSED
+  DISCONNECTED
+  ERROR
+}
+
+enum WhatsAppWebhookEventStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+  IGNORED
+}
+
+model Account {
+  id        String   @id @default(uuid()) @db.Uuid
+  slug      String   @unique
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  whatsAppConnections   WhatsAppConnection[]
+  whatsAppWebhookEvents WhatsAppWebhookEvent[]
+  whatsAppConversations WhatsAppConversation[]
+  whatsAppMessages      WhatsAppMessage[]
+  whatsAppTemplates     WhatsAppTemplate[]
+  whatsAppOutboundJobs  WhatsAppOutboundJob[]
+
+  @@map("accounts")
+}
+
+model WhatsAppConnection {
+  id                 String                   @id @default(uuid()) @db.Uuid
+  accountId          String                   @map("account_id") @db.Uuid
+  label              String?
+  metaBusinessId     String?                  @map("meta_business_id")
+  wabaId             String                   @map("waba_id")
+  phoneNumberId      String                   @map("phone_number_id")
+  displayPhoneNumber String?                  @map("display_phone_number")
+  verifiedName       String?                  @map("verified_name")
+  status             WhatsAppConnectionStatus @default(PENDING)
+  webhookStatus      String                   @default("pending") @map("webhook_status")
+  billingStatus      String                   @default("customer_managed") @map("billing_status")
+  sendingEnabled     Boolean                  @default(false) @map("sending_enabled")
+  templatesEnabled   Boolean                  @default(false) @map("templates_enabled")
+  capabilities       Json?
+  accessTokenCipher  String?                  @map("access_token_cipher") @db.Text
+  tokenExpiresAt     DateTime?                @map("token_expires_at")
+  connectedAt        DateTime?                @map("connected_at")
+  disconnectedAt     DateTime?                @map("disconnected_at")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+  updatedAt          DateTime                 @updatedAt @map("updated_at")
+
+  account       Account                @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  webhookEvents WhatsAppWebhookEvent[]
+  conversations WhatsAppConversation[]
+  messages      WhatsAppMessage[]
+  templates     WhatsAppTemplate[]
+  outboundJobs  WhatsAppOutboundJob[]
+
+  @@unique([accountId, phoneNumberId], name: "accountId_phoneNumberId")
+  @@index([accountId])
+  @@index([phoneNumberId])
+  @@map("whatsapp_connections")
+}
+
+model WhatsAppWebhookEvent {
+  id            String                     @id @default(uuid()) @db.Uuid
+  accountId     String?                    @map("account_id") @db.Uuid
+  connectionId  String?                    @map("connection_id") @db.Uuid
+  eventKey      String                     @unique @map("event_key")
+  eventType     String                     @map("event_type")
+  phoneNumberId String?                    @map("phone_number_id")
+  status        WhatsAppWebhookEventStatus @default(RECEIVED)
+  payload       Json
+  error         String?
+  receivedAt    DateTime                   @default(now()) @map("received_at")
+  processedAt   DateTime?                  @map("processed_at")
+
+  account    Account?            @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  connection WhatsAppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, receivedAt])
+  @@index([connectionId, receivedAt])
+  @@index([phoneNumberId])
+  @@map("whatsapp_webhook_events")
+}
+
+model WhatsAppConversation {
+  id                     String    @id @default(uuid()) @db.Uuid
+  accountId              String    @map("account_id") @db.Uuid
+  connectionId           String?   @map("connection_id") @db.Uuid
+  phoneNumberId          String    @map("phone_number_id")
+  customerPhone          String    @map("customer_phone")
+  customerName           String?   @map("customer_name")
+  status                 String    @default("open")
+  unreadCount            Int       @default(0) @map("unread_count")
+  lastMessageAt          DateTime? @map("last_message_at")
+  lastInboundAt          DateTime? @map("last_inbound_at")
+  lastOutboundAt         DateTime? @map("last_outbound_at")
+  serviceWindowExpiresAt DateTime? @map("service_window_expires_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  account    Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  connection WhatsAppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  messages   WhatsAppMessage[]
+
+  @@unique([accountId, phoneNumberId, customerPhone], name: "accountId_phoneNumberId_customerPhone")
+  @@index([accountId, updatedAt])
+  @@index([connectionId])
+  @@map("whatsapp_conversations")
+}
+
+model WhatsAppMessage {
+  id                String    @id @default(uuid()) @db.Uuid
+  accountId         String    @map("account_id") @db.Uuid
+  connectionId      String?   @map("connection_id") @db.Uuid
+  conversationId    String?   @map("conversation_id") @db.Uuid
+  externalMessageId String?   @unique @map("external_message_id")
+  direction         String
+  messageType       String    @map("message_type")
+  text              String?   @db.Text
+  status            String    @default("received")
+  payload           Json
+  sentAt            DateTime? @map("sent_at")
+  deliveredAt       DateTime? @map("delivered_at")
+  readAt            DateTime? @map("read_at")
+  failedAt          DateTime? @map("failed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  account      Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  connection   WhatsAppConnection?   @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  conversation WhatsAppConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([connectionId])
+  @@map("whatsapp_messages")
+}
+
+model WhatsAppTemplate {
+  id              String   @id @default(uuid()) @db.Uuid
+  accountId       String   @map("account_id") @db.Uuid
+  connectionId    String?  @map("connection_id") @db.Uuid
+  wabaId          String?  @map("waba_id")
+  name            String
+  language        String
+  category        String
+  status          String   @default("draft")
+  components      Json
+  externalId      String?  @map("external_id")
+  qualityRating   String?  @map("quality_rating")
+  rejectionReason String?  @map("rejection_reason")
+  variables       Json?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  account    Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  connection WhatsAppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@unique([accountId, name, language], name: "accountId_name_language")
+  @@index([accountId, status])
+  @@index([connectionId])
+  @@map("whatsapp_templates")
+}
+
+model WhatsAppOutboundJob {
+  id           String    @id @default(uuid()) @db.Uuid
+  accountId    String    @map("account_id") @db.Uuid
+  connectionId String?   @map("connection_id") @db.Uuid
+  kind         String
+  status       String    @default("queued")
+  attempts     Int       @default(0)
+  payload      Json
+  lastError    String?   @map("last_error")
+  runAfter     DateTime? @map("run_after")
+  processedAt  DateTime? @map("processed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  account    Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  connection WhatsAppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, status, createdAt])
+  @@index([connectionId])
+  @@map("whatsapp_outbound_jobs")
+}

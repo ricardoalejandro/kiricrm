@@ -20,6 +20,7 @@ dist/
 **/.next/
 coverage/
 *.tsbuildinfo
+.cache/
 
 # Logs and local tool output
 *.log

@@ -4,6 +4,10 @@ WORKDIR /app
 
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates openssl \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN corepack enable && corepack prepare pnpm@10.34.3 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc tsconfig.base.json ./
@@ -16,6 +20,7 @@ FROM deps AS build
 
 COPY apps/api apps/api
 
+RUN pnpm --filter @kiricrm/api db:generate
 RUN pnpm run build
 
 FROM node:20.20.0-slim AS runtime
@@ -27,15 +32,20 @@ ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=8080
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates openssl \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN corepack enable && corepack prepare pnpm@10.34.3 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY scripts scripts
 COPY apps/api/package.json apps/api/package.json
-
-RUN pnpm install --prod --frozen-lockfile
+COPY --from=build /app/node_modules node_modules
+COPY --from=build /app/apps/api/node_modules apps/api/node_modules
 
 COPY --from=build /app/apps/api/dist apps/api/dist
+COPY --from=build /app/apps/api/prisma apps/api/prisma
 
 EXPOSE 8080
 

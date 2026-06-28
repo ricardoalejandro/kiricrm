@@ -48,6 +48,10 @@ and must be treated only as reference material.
   `pnpm-workspace.yaml`.
 - Keep the `undici-types` override pinned unless a newer version has equivalent
   provenance/attestation evidence and passes pnpm trust checks.
+- Keep the `chokidar` override pinned to the latest trusted version that passes
+  pnpm trust checks while Prisma depends on an untrusted newer release.
+- Keep the `effect` override/minimum-release-age exception only while it is
+  needed to patch the Prisma transitive advisory GHSA-38f7-945m-qr2g.
 - Avoid dev tools that pull native installer scripts unless they are necessary.
   Prefer the smallest dependency tree that supports the current backend slice.
 - If a development API is exposed outside `127.0.0.1`, prefer a dedicated
@@ -73,10 +77,23 @@ and must be treated only as reference material.
 - Do not print secrets, `.env`, JWTs, cookies, database passwords, or access
   tokens.
 
+## WhatsApp Backend
+
+- Use the official WhatsApp Cloud API only.
+- Do not add WhatsApp Web, QR-device pairing, unofficial clients or whatsmeow.
+- Keep real outbound sends disabled unless the owner explicitly approves it.
+  `WA_SENDING_ENABLED=false` must block text replies even if a connection exists.
+- Keep real template submission disabled unless the owner explicitly approves it.
+  `WA_TEMPLATES_ENABLED=false` must block template submission to Meta.
+- Public Meta webhook routes must not require `x-kiri-dev-token`, but POST
+  webhook requests must verify `x-hub-signature-256` with
+  `WA_WEBHOOK_APP_SECRET`.
+- Store webhook events idempotently and never store or return raw access tokens.
+  WhatsApp access tokens must be encrypted with `WA_TOKEN_ENCRYPTION_KEY`.
+
 ## Out of Scope For Now
 
 - Frontend implementation.
-- WhatsApp integrations.
 - Kommo integrations.
 - Public production deployment.
 - Public access through `kiricrm.com`.

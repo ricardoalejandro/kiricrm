@@ -6,6 +6,8 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common'
+import { Reflector } from '@nestjs/core'
+import { PUBLIC_ROUTE_METADATA } from './public-route.decorator.js'
 
 const TOKEN_HEADER = 'x-kiri-dev-token'
 
@@ -28,7 +30,18 @@ function tokensMatch(expected: string, received: string) {
 
 @Injectable()
 export class DevTokenGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
   canActivate(context: ExecutionContext) {
+    const isPublicRoute = this.reflector.getAllAndOverride<boolean>(PUBLIC_ROUTE_METADATA, [
+      context.getHandler(),
+      context.getClass(),
+    ])
+
+    if (isPublicRoute) {
+      return true
+    }
+
     const expectedToken = process.env.KIRI_DEV_API_TOKEN
 
     if (!expectedToken) {
