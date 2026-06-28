@@ -11,7 +11,7 @@
     "preinstall": "node scripts/enforce-pnpm.cjs",
     "dev:api": "pnpm --filter @kiricrm/api dev",
     "start:api": "pnpm --filter @kiricrm/api start",
-    "start:api:local": "PORT=18080 pnpm --filter @kiricrm/api start",
+    "start:api:local": "PORT=18080 pnpm --filter @kiricrm/api start:local",
     "build": "pnpm --filter @kiricrm/api build",
     "typecheck": "pnpm --filter @kiricrm/api typecheck",
     "security:audit": "pnpm audit --prod",

@@ -5,6 +5,11 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { AppModule } from './modules/app.module.js'
 
 const DEFAULT_PORT = 8080
+const DEFAULT_HOST = '127.0.0.1'
+
+function readHost() {
+  return process.env.HOST || DEFAULT_HOST
+}
 
 function readPort() {
   const value = Number(process.env.PORT || DEFAULT_PORT)
@@ -23,7 +28,7 @@ async function bootstrap() {
     exclude: ['health'],
   })
 
-  await app.listen({ host: '127.0.0.1', port: readPort() })
+  await app.listen({ host: readHost(), port: readPort() })
 }
 
 bootstrap().catch((error) => {

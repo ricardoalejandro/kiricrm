@@ -1,0 +1,42 @@
+FROM node:20.20.0-slim AS deps
+
+WORKDIR /app
+
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
+RUN corepack enable && corepack prepare pnpm@10.34.3 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc tsconfig.base.json ./
+COPY scripts scripts
+COPY apps/api/package.json apps/api/package.json
+
+RUN pnpm install --frozen-lockfile
+
+FROM deps AS build
+
+COPY apps/api apps/api
+
+RUN pnpm run build
+
+FROM node:20.20.0-slim AS runtime
+
+WORKDIR /app
+
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV PORT=8080
+
+RUN corepack enable && corepack prepare pnpm@10.34.3 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY scripts scripts
+COPY apps/api/package.json apps/api/package.json
+
+RUN pnpm install --prod --frozen-lockfile
+
+COPY --from=build /app/apps/api/dist apps/api/dist
+
+EXPOSE 8080
+
+CMD ["pnpm", "--filter", "@kiricrm/api", "start"]

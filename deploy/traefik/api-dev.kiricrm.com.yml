@@ -1,0 +1,41 @@
+http:
+  routers:
+    kiricrm-api-dev-router:
+      rule: "Host(`api-dev.kiricrm.com`)"
+      service: kiricrm-api-dev-service
+      entryPoints:
+        - web
+      middlewares:
+        - redirect-to-https
+    kiricrm-api-dev-router-secure:
+      rule: "Host(`api-dev.kiricrm.com`)"
+      service: kiricrm-api-dev-service
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - kiricrm-api-dev-security-headers
+        - kiricrm-api-dev-rate-limit
+  services:
+    kiricrm-api-dev-service:
+      loadBalancer:
+        servers:
+          - url: http://kiricrm-api-dev:8080
+        passHostHeader: true
+  middlewares:
+    kiricrm-api-dev-security-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        frameDeny: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customResponseHeaders:
+          X-Robots-Tag: "noindex, nofollow"
+    kiricrm-api-dev-rate-limit:
+      rateLimit:
+        average: 60
+        period: 1m
+        burst: 20

@@ -1,0 +1,185 @@
+{
+  "info": {
+    "_postman_id": "fa6bd8f2-85c1-4a58-a30d-18e6e7c2ce21",
+    "name": "Kiri CRM Backend - v003",
+    "description": "Coleccion para probar el backend de Kiri CRM publicado en el subdominio de desarrollo api-dev.kiricrm.com. Requiere configurar la variable secreta dev_api_token con el valor privado del VPS. No guardar ni compartir el token real dentro del repositorio.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "x-kiri-dev-token",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{dev_api_token}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://api-dev.kiricrm.com",
+      "type": "string",
+      "description": "URL base publica de desarrollo. Debe usar HTTPS y pasar por Traefik hacia el backend Kiri."
+    },
+    {
+      "key": "api_prefix",
+      "value": "api",
+      "type": "string",
+      "description": "Prefijo global de la API NestJS. El endpoint /health esta excluido de este prefijo."
+    },
+    {
+      "key": "dev_api_token",
+      "value": "PEGAR_AQUI_EL_TOKEN_LOCAL_DEL_ENV",
+      "type": "secret",
+      "description": "Token privado de desarrollo. Debe coincidir con KIRI_DEV_API_TOKEN en el archivo .env del VPS. No subir el token real a Git."
+    }
+  ],
+  "item": [
+    {
+      "name": "Sistema",
+      "description": "Endpoints tecnicos para comprobar que el backend esta vivo y protegido por token.",
+      "item": [
+        {
+          "name": "Salud del servicio",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Comprueba que el servicio kiricrm-api esta levantado detras de api-dev.kiricrm.com. Requiere el header x-kiri-dev-token configurado desde la variable dev_api_token."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Responde HTTP 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Respuesta de salud valida', function () {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.success).to.eql(true);",
+                  "  pm.expect(json.service).to.eql('kiricrm-api');",
+                  "  pm.expect(json.status).to.eql('ok');",
+                  "  pm.expect(json.timestamp).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Pruebas iniciales",
+      "description": "Endpoints funcionales minimos creados para validar la infraestructura inicial del backend.",
+      "item": [
+        {
+          "name": "Hola mundo",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/{{api_prefix}}/hello",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "{{api_prefix}}",
+                "hello"
+              ]
+            },
+            "description": "Endpoint minimo para comprobar que el prefijo /api, los controladores de NestJS, el dominio de desarrollo y el token funcionan."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Responde HTTP 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Respuesta hola mundo valida', function () {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.success).to.eql(true);",
+                  "  pm.expect(json.message).to.eql('hola mundo');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Seguridad",
+      "description": "Pruebas negativas para confirmar que las requests sin token no pasan.",
+      "item": [
+        {
+          "name": "Sin token debe fallar",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/{{api_prefix}}/hello",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "{{api_prefix}}",
+                "hello"
+              ]
+            },
+            "description": "Esta request desactiva la autenticacion de la coleccion a proposito. Debe fallar con HTTP 401 si el guard de token esta funcionando."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Sin token responde HTTP 401', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});",
+                  "",
+                  "pm.test('Respuesta de error esperada', function () {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.message).to.eql('Invalid API token');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
