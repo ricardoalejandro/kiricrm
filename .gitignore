@@ -1,69 +1,26 @@
+# Archived legacy project. Keep locally only; never commit it.
+_old/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
 # Dependencies
 node_modules/
-vendor/
+**/node_modules/
 
-# Build outputs
-.next/
-out/
+# Build outputs and caches
 dist/
-build/
-*.exe
-*.dll
-*.so
-*.dylib
-
-# Environment files
-.env
-.env.local
-.env.*.local
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Testing
+**/dist/
+.next/
+**/.next/
 coverage/
-*.out
+*.tsbuildinfo
 
-# WhatsApp sessions (sensitive data)
-wa_sessions/
-sessions/
-*.db
+# Logs and local tool output
+*.log
+.codex-log/
 
-# Media uploads
-media/
-uploads/
-
-# Temporary files
-tmp/
-temp/
-*.tmp
-
-# Docker
-*.tar
-
-# Go
-/backend/clarin
-kommo_export_leads_2026-02-14.csv
-difusion_moquegua_chats.csv
-backups/*.sql
-
-# Playwright
-/test-results/
-/playwright-report/
-/blob-report/
-/playwright/.cache/
-/playwright/.auth/
+# OS/editor noise
+.DS_Store

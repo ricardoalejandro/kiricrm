@@ -1,0 +1,22 @@
+# Local-only archive and repository metadata
+_old
+.git
+.codex-log
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules
+**/node_modules
+
+# Build outputs and caches
+dist
+**/dist
+.next
+**/.next
+coverage
+*.log
+*.tsbuildinfo
