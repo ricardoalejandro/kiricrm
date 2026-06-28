@@ -29,14 +29,24 @@ apps/api/
 
 - Node.js 20
 - TypeScript strict mode
-- NestJS 10
-- Fastify 4 via `@nestjs/platform-fastify`
+- pnpm 10.34.3 via Corepack
+- NestJS 11
+- Fastify via `@nestjs/platform-fastify`
 - Prisma Client
 - PostgreSQL 16
 - Redis 7 for cache/rate limits/future queues
 
 ## Rules
 
+- Use pnpm only. Do not use `npm install`, `npm ci`, Yarn or Bun in this repo.
+- Keep dependency versions exact and preserve pnpm supply-chain controls:
+  `minimumReleaseAge` at 7 days and dependency build scripts denied unless the
+  owner explicitly approves them.
+- Keep `trustPolicy: no-downgrade` and `blockExoticSubdeps: true` enabled.
+- Keep the `undici-types` pnpm override pinned unless a newer version has
+  equivalent provenance/attestation evidence and passes pnpm trust checks.
+- Avoid dev dependencies that require native installer scripts unless they are
+  necessary for the current backend slice.
 - Keep API stateless.
 - Keep every business entity scoped by `account_id`.
 - Validate request payloads with Zod or Nest pipes before writing.
@@ -67,8 +77,8 @@ WhatsApp is not active in this phase.
 After schema changes:
 
 ```bash
-npm --workspace @kiricrm/api run db:generate
-npm --workspace @kiricrm/api run typecheck
+pnpm --filter @kiricrm/api db:generate
+pnpm --filter @kiricrm/api typecheck
 ```
 
 Do not run destructive migrations or database resets against production without explicit approval.
@@ -76,13 +86,13 @@ Do not run destructive migrations or database resets against production without 
 ## Build
 
 ```bash
-npm --workspace @kiricrm/api run typecheck
-npm --workspace @kiricrm/api run build
+pnpm --filter @kiricrm/api typecheck
+pnpm --filter @kiricrm/api build
 docker build -t kiricrm-api:latest -f deploy/Dockerfile.api .
 ```
 
 ## Common Runtime Failures
 
-- `FST_ERR_PLUGIN_VERSION_MISMATCH`: Fastify plugin version does not match Nest Fastify version. NestJS 10 uses Fastify 4.
+- `FST_ERR_PLUGIN_VERSION_MISMATCH`: Fastify plugin version does not match the Nest Fastify adapter.
 - Prisma `P1001`: API cannot reach Postgres. Check service DNS and network.
 - Prisma `P1000`: credentials mismatch. Do not rotate password without explicit approval.

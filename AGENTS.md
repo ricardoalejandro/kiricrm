@@ -18,8 +18,9 @@ and must be treated only as reference material.
 ## Backend Stack
 
 - Node.js 20
+- pnpm 10.34.3 via Corepack
 - TypeScript
-- NestJS 10
+- NestJS 11
 - Fastify via `@nestjs/platform-fastify`
 - Prisma
 - PostgreSQL 16
@@ -28,6 +29,17 @@ and must be treated only as reference material.
 
 ## Backend Rules
 
+- Use pnpm only. Never use `npm install`, `npm ci`, Yarn, or Bun for this repo.
+- Keep dependency versions exact and review recently published packages before
+  adding or upgrading dependencies.
+- Preserve pnpm security settings: `minimumReleaseAge` must stay at 7 days and
+  dependency build scripts must stay denied unless explicitly approved.
+- Keep `trustPolicy: no-downgrade` and `blockExoticSubdeps: true` enabled in
+  `pnpm-workspace.yaml`.
+- Keep the `undici-types` override pinned unless a newer version has equivalent
+  provenance/attestation evidence and passes pnpm trust checks.
+- Avoid dev tools that pull native installer scripts unless they are necessary.
+  Prefer the smallest dependency tree that supports the current backend slice.
 - Keep the API stateless.
 - Keep tenant-owned data scoped by `account_id`.
 - Validate request payloads before writes.

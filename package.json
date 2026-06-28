@@ -1,0 +1,32 @@
+{
+  "name": "@kiricrm/root",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kiri CRM backend-first rebuild.",
+  "packageManager": "pnpm@10.34.3",
+  "workspaces": [
+    "apps/api"
+  ],
+  "scripts": {
+    "preinstall": "node scripts/enforce-pnpm.cjs",
+    "dev:api": "pnpm --filter @kiricrm/api dev",
+    "start:api": "pnpm --filter @kiricrm/api start",
+    "start:api:local": "PORT=18080 pnpm --filter @kiricrm/api start",
+    "build": "pnpm --filter @kiricrm/api build",
+    "typecheck": "pnpm --filter @kiricrm/api typecheck",
+    "security:audit": "pnpm audit --prod",
+    "security:audit:all": "pnpm audit",
+    "security:deps": "pnpm list --depth 0 --recursive",
+    "security:ignored-builds": "pnpm ignored-builds"
+  },
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": "10.34.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "undici-types": "6.19.2"
+    }
+  },
+  "license": "UNLICENSED"
+}

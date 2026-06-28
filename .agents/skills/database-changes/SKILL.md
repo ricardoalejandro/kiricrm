@@ -17,6 +17,7 @@ The old Go `backend/pkg/database/database.go` migration style is legacy referenc
 
 ## Rules
 
+- Use pnpm only. Do not use `npm install`, `npm ci`, Yarn or Bun in this repo.
 - PostgreSQL is the source of truth.
 - Prisma is the schema/client layer for the current API.
 - Every tenant-owned table must include `account_id`.
@@ -27,9 +28,9 @@ The old Go `backend/pkg/database/database.go` migration style is legacy referenc
 ## Commands
 
 ```bash
-npm --workspace @kiricrm/api run db:generate
-npm --workspace @kiricrm/api run typecheck
-npm --workspace @kiricrm/api run build
+pnpm --filter @kiricrm/api db:generate
+pnpm --filter @kiricrm/api typecheck
+pnpm --filter @kiricrm/api build
 ```
 
 For production migrations, require an explicit migration plan and backup/rollback note before execution.

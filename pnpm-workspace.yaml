@@ -1,0 +1,16 @@
+packages:
+  - apps/*
+
+minimumReleaseAge: 10080
+
+trustPolicy: no-downgrade
+blockExoticSubdeps: true
+engineStrict: true
+packageManagerStrict: true
+packageManagerStrictVersion: true
+managePackageManagerVersions: true
+preferFrozenLockfile: true
+savePrefix: ''
+strictDepBuilds: true
+dangerouslyAllowAllBuilds: false
+allowBuilds: {}
