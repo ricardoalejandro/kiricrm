@@ -50,6 +50,11 @@ and must be treated only as reference material.
   provenance/attestation evidence and passes pnpm trust checks.
 - Avoid dev tools that pull native installer scripts unless they are necessary.
   Prefer the smallest dependency tree that supports the current backend slice.
+- If a development API is exposed outside `127.0.0.1`, prefer a dedicated
+  subdomain such as `api-dev.kiricrm.com`, HTTPS, firewall/reverse proxy rules,
+  and the `x-kiri-dev-token` header. Do not describe any setup as unhackable.
+- Never commit real API tokens. Use `.env` for `KIRI_DEV_API_TOKEN` and
+  Postman secret/current values for local testing.
 - Keep the API stateless.
 - Keep tenant-owned data scoped by `account_id`.
 - Validate request payloads before writes.
@@ -61,6 +66,8 @@ and must be treated only as reference material.
   the existing collection version.
 - Write Postman collection names, descriptions, variables and comments in
   Spanish so the owner can understand and test each endpoint easily.
+- Add a negative Postman request when token/auth behavior changes, so missing
+  or invalid credentials are tested explicitly.
 - Use httpOnly cookies when auth is added.
 - Do not enable public signup without explicit approval.
 - Do not print secrets, `.env`, JWTs, cookies, database passwords, or access

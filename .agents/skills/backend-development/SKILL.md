@@ -57,6 +57,11 @@ apps/api/
   equivalent provenance/attestation evidence and passes pnpm trust checks.
 - Avoid dev dependencies that require native installer scripts unless they are
   necessary for the current backend slice.
+- If a development API is exposed outside `127.0.0.1`, prefer a dedicated
+  subdomain such as `api-dev.kiricrm.com`, HTTPS, firewall/reverse proxy rules,
+  and the `x-kiri-dev-token` header. Do not describe any setup as unhackable.
+- Never commit real API tokens. Use `.env` for `KIRI_DEV_API_TOKEN` and
+  Postman secret/current values for local testing.
 - Keep API stateless.
 - Keep every business entity scoped by `account_id`.
 - Validate request payloads with Zod or Nest pipes before writing.
@@ -70,6 +75,8 @@ apps/api/
   the existing collection version.
 - Write Postman collection names, descriptions, variables and comments in
   Spanish so the owner can understand and test each endpoint easily.
+- Add a negative Postman request when token/auth behavior changes, so missing
+  or invalid credentials are tested explicitly.
 - Never return raw database errors or secrets to the client.
 
 ## Auth
