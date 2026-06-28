@@ -63,6 +63,13 @@ apps/api/
 - Never trust account IDs from client body when authenticated user context already has account.
 - Avoid N+1 queries. Use Prisma includes/selects intentionally.
 - Return stable response shapes that the frontend can render safely.
+- Keep Postman collections in `tmp_ric/`. When backend API endpoints, methods,
+  request bodies, response shapes or auth behavior change, create a new
+  versioned collection file using the next suffix, for example
+  `kiricrm-backend-postman-v002.json`. If the backend/API did not change, keep
+  the existing collection version.
+- Write Postman collection names, descriptions, variables and comments in
+  Spanish so the owner can understand and test each endpoint easily.
 - Never return raw database errors or secrets to the client.
 
 ## Auth

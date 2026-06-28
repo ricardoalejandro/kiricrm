@@ -54,6 +54,13 @@ and must be treated only as reference material.
 - Keep tenant-owned data scoped by `account_id`.
 - Validate request payloads before writes.
 - Prefer stable JSON responses that are easy to test from Postman.
+- Keep Postman collections in `tmp_ric/`. When backend API endpoints, methods,
+  request bodies, response shapes or auth behavior change, create a new
+  versioned collection file using the next suffix, for example
+  `kiricrm-backend-postman-v002.json`. If the backend/API did not change, keep
+  the existing collection version.
+- Write Postman collection names, descriptions, variables and comments in
+  Spanish so the owner can understand and test each endpoint easily.
 - Use httpOnly cookies when auth is added.
 - Do not enable public signup without explicit approval.
 - Do not print secrets, `.env`, JWTs, cookies, database passwords, or access

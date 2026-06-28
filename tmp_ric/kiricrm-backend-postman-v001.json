@@ -1,0 +1,113 @@
+{
+  "info": {
+    "_postman_id": "d984e955-7190-4fd1-a90b-5b6836107163",
+    "name": "Kiri CRM Backend - v001",
+    "description": "Coleccion inicial para probar el backend local de Kiri CRM. Importar en Postman y revisar las variables de coleccion antes de ejecutar. Esta version contiene todos los endpoints disponibles al momento de crear v001: salud del servicio y hola mundo.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:18080",
+      "type": "string",
+      "description": "URL base local del backend. De momento el backend escucha solo en 127.0.0.1 para evitar exposicion publica."
+    },
+    {
+      "key": "api_prefix",
+      "value": "api",
+      "type": "string",
+      "description": "Prefijo global de la API NestJS. El endpoint /health esta excluido de este prefijo."
+    }
+  ],
+  "item": [
+    {
+      "name": "Sistema",
+      "description": "Endpoints tecnicos para comprobar que el backend esta vivo y respondiendo.",
+      "item": [
+        {
+          "name": "Salud del servicio",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Comprueba que el servicio kiricrm-api esta levantado. Debe responder success=true, service=kiricrm-api y status=ok."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Responde HTTP 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Respuesta de salud valida', function () {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.success).to.eql(true);",
+                  "  pm.expect(json.service).to.eql('kiricrm-api');",
+                  "  pm.expect(json.status).to.eql('ok');",
+                  "  pm.expect(json.timestamp).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Pruebas iniciales",
+      "description": "Endpoints funcionales minimos creados para validar la infraestructura inicial del backend.",
+      "item": [
+        {
+          "name": "Hola mundo",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/{{api_prefix}}/hello",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "{{api_prefix}}",
+                "hello"
+              ]
+            },
+            "description": "Endpoint minimo para comprobar que el prefijo /api y los controladores de NestJS funcionan. Debe devolver success=true y message='hola mundo'."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Responde HTTP 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Respuesta hola mundo valida', function () {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.success).to.eql(true);",
+                  "  pm.expect(json.message).to.eql('hola mundo');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
