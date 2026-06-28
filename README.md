@@ -43,6 +43,10 @@ install dependencies.
 Security defaults:
 
 - pnpm is pinned with `packageManager`.
+- pnpm should be reviewed monthly, or sooner for a pnpm/Corepack security
+  advisory. Do not update it automatically just because a newer version exists.
+- prefer pnpm releases that are at least 7 days old unless the update fixes a
+  known security issue.
 - dependency versions are exact.
 - `minimumReleaseAge` is set to 7 days.
 - `trustPolicy` is set to `no-downgrade`.

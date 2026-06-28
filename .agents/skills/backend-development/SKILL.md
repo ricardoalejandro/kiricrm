@@ -39,6 +39,16 @@ apps/api/
 ## Rules
 
 - Use pnpm only. Do not use `npm install`, `npm ci`, Yarn or Bun in this repo.
+- Keep pnpm pinned in `packageManager`, `engines.pnpm`, README commands and
+  Corepack commands. Do not update pnpm automatically just because a newer
+  version exists.
+- Review the pinned pnpm version at least once per month, and immediately if
+  there is a pnpm/Corepack security advisory or an install/audit issue related
+  to the package manager. Before updating pnpm, check release age and changelog,
+  then run `pnpm install`, `pnpm audit`, `pnpm --filter @kiricrm/api typecheck`
+  and `pnpm --filter @kiricrm/api build`.
+- Prefer pnpm versions that are at least 7 days old unless the update fixes a
+  known security issue.
 - Keep dependency versions exact and preserve pnpm supply-chain controls:
   `minimumReleaseAge` at 7 days and dependency build scripts denied unless the
   owner explicitly approves them.

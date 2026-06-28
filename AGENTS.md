@@ -30,6 +30,16 @@ and must be treated only as reference material.
 ## Backend Rules
 
 - Use pnpm only. Never use `npm install`, `npm ci`, Yarn, or Bun for this repo.
+- Keep pnpm pinned in `packageManager`, `engines.pnpm`, README commands and
+  Corepack commands. Do not update pnpm automatically just because a newer
+  version exists.
+- Review the pinned pnpm version at least once per month, and immediately if
+  there is a pnpm/Corepack security advisory or an install/audit issue related
+  to the package manager. Before updating pnpm, check release age and changelog,
+  then run `pnpm install`, `pnpm audit`, `pnpm run typecheck` and
+  `pnpm run build`.
+- Prefer pnpm versions that are at least 7 days old unless the update fixes a
+  known security issue.
 - Keep dependency versions exact and review recently published packages before
   adding or upgrading dependencies.
 - Preserve pnpm security settings: `minimumReleaseAge` must stay at 7 days and
